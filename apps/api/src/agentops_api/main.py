@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from agentops_api.config import get_settings
 from agentops_api.db import engine
+from agentops_api.routers.executions import router as executions_router
 
 
 settings = get_settings()
@@ -25,6 +26,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.include_router(executions_router)
 
 @app.get("/", tags=["platform"])
 def root():

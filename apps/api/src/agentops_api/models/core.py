@@ -1,6 +1,5 @@
 
 import uuid
-
 from datetime import datetime
 
 from sqlalchemy import (
@@ -8,37 +7,30 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    Text,
     UniqueConstraint,
-    Uuid,
     func,
 )
-
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import foreign, Mapped, mapped_column, relationship
 
 from agentops_api.models.base import Base
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    BigInteger,
+    and_,
+    ForeignKeyConstraint,
+)
 
 
 class Organization(Base):
-
     __tablename__ = "organizations"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )
-
-    name: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-
-    slug: Mapped[str] = mapped_column(
-        String(100),
-        unique=True,
-        nullable=False,
-    )
-
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -52,7 +44,6 @@ class Organization(Base):
 
 
 class Project(Base):
-
     __tablename__ = "projects"
 
     __table_args__ = (
@@ -61,34 +52,146 @@ class Project(Base):
             "slug",
             name="uq_projects_organization_slug",
         ),
-        Index(
-            "ix_projects_organization_id",
-            "organization_id",
-        ),
+        Index("ix_projects_organization_id", "organization_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    organization: Mapped["Organization"] = relationship(
+        back_populates="projects",
+    )
+
+    environments: Mapped[list["Environment"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+
+    integrations: Mapped[list["Integration"]] = relationship(
+    back_populates="project",
+    cascade="all, delete-orphan",
+    )
+
+    sessions: Mapped[list["Session"]] = relationship(
+    back_populates="project",
+    cascade="all, delete-orphan",
+    )
+
+
+class Environment(Base):
+    __tablename__ = "environments"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "slug",
+            name="uq_environments_project_slug",
+        ),
+        Index("ix_environments_project_id", "project_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    slug: Mapped[str] = mapped_column(String(50), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    agents: Mapped[list["Agent"]] = relationship(
+    back_populates="environment",
+    cascade="all, delete-orphan",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    project: Mapped["Project"] = relationship(
+        back_populates="environments",
+    )
+
+    integrations: Mapped[list["Integration"]] = relationship(
+    back_populates="environment",
+    )
+
+    sessions: Mapped[list["Session"]] = relationship(
+    back_populates="environment",
+    cascade="all, delete-orphan",
+    )
+
+
+
+class Agent(Base):
+    __tablename__ = "agents"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "slug",
+            name="uq_agents_environment_slug",
+        ),
+        Index("ix_agents_environment_id", "environment_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
         default=uuid.uuid4,
     )
 
-    organization_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey(
-            "organizations.id",
-            ondelete="CASCADE",
-        ),
+    environment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
     )
 
     name: Mapped[str] = mapped_column(
-        String(255),
+        String(150),
         nullable=False,
     )
 
     slug: Mapped[str] = mapped_column(
         String(100),
+        nullable=False,
+    )
+
+    description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    framework: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="registered",
+        server_default="registered",
         nullable=False,
     )
 
@@ -98,6 +201,348 @@ class Project(Base):
         nullable=False,
     )
 
-    organization: Mapped["Organization"] = relationship(
-        back_populates="projects",
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    environment: Mapped["Environment"] = relationship(
+        back_populates="agents",
+    )
+
+    versions: Mapped[list["AgentVersion"]] = relationship(
+    back_populates="agent",
+    cascade="all, delete-orphan",
+    )
+
+
+class AgentVersion(Base):
+    __tablename__ = "agent_versions"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id",
+            "version",
+            name="uq_agent_versions_agent_version",
+        ),
+        UniqueConstraint(
+            "id",
+            "agent_id",
+            name="uq_agent_versions_id_agent_id",
+        ),
+        Index("ix_agent_versions_agent_id", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    version: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    configuration: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    deployment_status: Mapped[str] = mapped_column(
+        String(30),
+        default="draft",
+        server_default="draft",
+        nullable=False,
+    )
+
+    deployed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    agent: Mapped["Agent"] = relationship(
+        back_populates="versions",
+    )
+
+
+class Integration(Base):
+    __tablename__ = "integrations"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "name",
+            name="uq_integrations_project_name",
+        ),
+        Index("ix_integrations_project_id", "project_id"),
+        Index("ix_integrations_environment_id", "environment_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    environment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("environments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
+
+    integration_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="pending",
+        server_default="pending",
+        nullable=False,
+    )
+
+    configuration: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    project: Mapped["Project"] = relationship(
+        back_populates="integrations",
+    )
+
+    environment: Mapped["Environment | None"] = relationship(
+        back_populates="integrations",
+    )
+
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id",
+            "external_session_id",
+            name="uq_sessions_environment_external_id",
+        ),
+        Index("ix_sessions_project_id", "project_id"),
+        Index("ix_sessions_environment_id", "environment_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    environment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("environments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    external_session_id: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="active",
+        server_default="active",
+        nullable=False,
+    )
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    project: Mapped["Project"] = relationship(
+        back_populates="sessions",
+    )
+
+    environment: Mapped["Environment"] = relationship(
+        back_populates="sessions",
+    )
+
+    executions: Mapped[list["Execution"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+
+
+class Execution(Base):
+    __tablename__ = "executions"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "external_execution_id",
+            name="uq_executions_session_external_id",
+        ),
+        ForeignKeyConstraint(
+            ["agent_version_id", "agent_id"],
+            ["agent_versions.id", "agent_versions.agent_id"],
+            name="fk_executions_version_agent",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_executions_session_id", "session_id"),
+        Index("ix_executions_agent_id", "agent_id"),
+        Index("ix_executions_agent_version_id", "agent_version_id"),
+        Index("ix_executions_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+    nullable=True,
+    )
+
+    external_execution_id: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="queued",
+        server_default="queued",
+        nullable=False,
+    )
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    duration_ms: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+
+    error_type: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    session: Mapped["Session"] = relationship(
+        back_populates="executions",
+    )
+
+    agent: Mapped["Agent"] = relationship(
+        foreign_keys=[agent_id],
+    )
+
+    agent_version: Mapped["AgentVersion | None"] = relationship(
+        primaryjoin=lambda: and_(
+            AgentVersion.id == foreign(Execution.agent_version_id),
+            AgentVersion.agent_id == Execution.agent_id,
+        ),
+        foreign_keys=lambda: [Execution.agent_version_id],
     )
