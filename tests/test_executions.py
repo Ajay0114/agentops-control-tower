@@ -1,13 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 from agentops_api.models.core import (
     Agent,
     AgentVersion,
     Environment,
+    Execution,
     Organization,
     Project,
     Session,
 )
+from agentops_api.services.api_key_service import create_api_key
 
 
 def create_test_context(db_session):
@@ -71,6 +74,18 @@ def create_test_context(db_session):
     }
 
 
+def auth_headers(db_session, organization_id, *, project_id=None, environment_id=None):
+    _, raw_key = create_api_key(
+        db_session,
+        organization_id=organization_id,
+        name="Test key",
+        project_id=project_id,
+        environment_id=environment_id,
+    )
+    db_session.commit()
+    return {"Authorization": f"Bearer {raw_key}"}
+
+
 def execution_payload(context, external_execution_id):
     return {
         "session_id": str(context["session"].id),
@@ -83,9 +98,10 @@ def execution_payload(context, external_execution_id):
 def test_create_execution_successfully(client, db_session):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
     payload = execution_payload(context, "test-execution-001")
 
-    response = client.post("/api/v1/executions", json=payload)
+    response = client.post("/api/v1/executions", json=payload, headers=headers)
 
     assert response.status_code == 201
 
@@ -98,13 +114,25 @@ def test_create_execution_successfully(client, db_session):
     assert data["status"] == "queued"
 
 
+def test_create_execution_without_auth_returns_401(client, db_session):
+    context = create_test_context(db_session)
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/executions", json=execution_payload(context, "no-auth")
+    )
+
+    assert response.status_code == 401
+
+
 def test_identical_request_returns_existing_execution(client, db_session):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
     payload = execution_payload(context, "test-idempotency-001")
 
-    first_response = client.post("/api/v1/executions", json=payload)
-    second_response = client.post("/api/v1/executions", json=payload)
+    first_response = client.post("/api/v1/executions", json=payload, headers=headers)
+    second_response = client.post("/api/v1/executions", json=payload, headers=headers)
 
     assert first_response.status_code == 201
     assert second_response.status_code == 200
@@ -115,9 +143,10 @@ def test_identical_request_returns_existing_execution(client, db_session):
 def test_conflicting_request_returns_409(client, db_session):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
     payload = execution_payload(context, "test-idempotency-conflict-001")
 
-    first_response = client.post("/api/v1/executions", json=payload)
+    first_response = client.post("/api/v1/executions", json=payload, headers=headers)
 
     conflicting_payload = {
         **payload,
@@ -127,28 +156,31 @@ def test_conflicting_request_returns_409(client, db_session):
     second_response = client.post(
         "/api/v1/executions",
         json=conflicting_payload,
+        headers=headers,
     )
 
     assert first_response.status_code == 201
     assert second_response.status_code == 409
 
 
-def test_missing_session_returns_422(client, db_session):
+def test_missing_session_returns_404(client, db_session):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
 
     payload = execution_payload(context, "test-missing-session-001")
     payload["session_id"] = str(uuid4())
 
-    response = client.post("/api/v1/executions", json=payload)
+    response = client.post("/api/v1/executions", json=payload, headers=headers)
 
-    assert response.status_code == 422
+    assert response.status_code == 404
     assert response.json()["detail"] == "Session not found"
 
 
 def test_agent_version_must_belong_to_agent(client, db_session):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
 
     another_agent = Agent(
         environment_id=context["environment"].id,
@@ -173,7 +205,7 @@ def test_agent_version_must_belong_to_agent(client, db_session):
     payload = execution_payload(context, "test-invalid-version-001")
     payload["agent_version_id"] = str(another_version.id)
 
-    response = client.post("/api/v1/executions", json=payload)
+    response = client.post("/api/v1/executions", json=payload, headers=headers)
 
     assert response.status_code == 422
     assert response.json()["detail"] == (
@@ -181,26 +213,74 @@ def test_agent_version_must_belong_to_agent(client, db_session):
     )
 
 
+def test_agent_and_session_in_different_environments_returns_422(client, db_session):
+    """Agent and Session each individually resolve within the caller's own
+    scope, but live in different environments - a self-consistency problem
+    (422), not a scope problem (404). No execution may be created."""
+    context = create_test_context(db_session)
+
+    other_environment = Environment(
+        project_id=context["project"].id,
+        name="Staging",
+        slug=f"staging-{uuid4().hex[:8]}",
+    )
+    db_session.add(other_environment)
+    db_session.flush()
+
+    other_environment_agent = Agent(
+        environment_id=other_environment.id,
+        name="Staging Agent",
+        slug=f"staging-agent-{uuid4().hex[:8]}",
+        framework="custom-python",
+        status="registered",
+    )
+    db_session.add(other_environment_agent)
+    db_session.flush()
+    db_session.commit()
+
+    headers = auth_headers(db_session, context["organization"].id)
+
+    # The session stays in context["environment"]; the agent lives in a
+    # different environment of the same (authenticated) organization.
+    payload = execution_payload(context, "cross-environment-execution")
+    payload["agent_id"] = str(other_environment_agent.id)
+
+    response = client.post("/api/v1/executions", json=payload, headers=headers)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Agent and session must belong to the same environment"
+    )
+
+    execution_count = db_session.query(Execution).filter_by(
+        session_id=context["session"].id,
+        external_execution_id="cross-environment-execution",
+    ).count()
+    assert execution_count == 0
+
+
 def create_execution_via_api(client, db_session, external_id):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
 
     payload = execution_payload(context, external_id)
-    response = client.post("/api/v1/executions", json=payload)
+    response = client.post("/api/v1/executions", json=payload, headers=headers)
 
     assert response.status_code == 201
 
-    return response.json()["id"]
+    return response.json()["id"], headers, context
 
 
 def test_execution_queued_to_running_to_completed(client, db_session):
-    execution_id = create_execution_via_api(
+    execution_id, headers, _ = create_execution_via_api(
         client, db_session, "test-lifecycle-completed-001"
     )
 
     running_response = client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "running"},
+        headers=headers,
     )
 
     assert running_response.status_code == 200
@@ -210,6 +290,7 @@ def test_execution_queued_to_running_to_completed(client, db_session):
     completed_response = client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "completed"},
+        headers=headers,
     )
 
     assert completed_response.status_code == 200
@@ -224,13 +305,14 @@ def test_execution_queued_to_running_to_completed(client, db_session):
 
 
 def test_execution_failure_stores_error_details(client, db_session):
-    execution_id = create_execution_via_api(
+    execution_id, headers, _ = create_execution_via_api(
         client, db_session, "test-lifecycle-failed-001"
     )
 
     client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "running"},
+        headers=headers,
     )
 
     response = client.patch(
@@ -240,6 +322,7 @@ def test_execution_failure_stores_error_details(client, db_session):
             "error_type": "ToolExecutionTimeout",
             "error_message": "Product lookup API timed out",
         },
+        headers=headers,
     )
 
     assert response.status_code == 200
@@ -254,13 +337,14 @@ def test_execution_failure_stores_error_details(client, db_session):
 
 
 def test_execution_rejects_invalid_transition(client, db_session):
-    execution_id = create_execution_via_api(
+    execution_id, headers, _ = create_execution_via_api(
         client, db_session, "test-lifecycle-invalid-001"
     )
 
     response = client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "completed"},
+        headers=headers,
     )
 
     assert response.status_code == 409
@@ -270,18 +354,20 @@ def test_execution_rejects_invalid_transition(client, db_session):
 
 
 def test_terminal_execution_cannot_transition_again(client, db_session):
-    execution_id = create_execution_via_api(
+    execution_id, headers, _ = create_execution_via_api(
         client, db_session, "test-lifecycle-terminal-001"
     )
 
     client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "running"},
+        headers=headers,
     )
 
     completed_response = client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "completed"},
+        headers=headers,
     )
 
     assert completed_response.status_code == 200
@@ -289,6 +375,7 @@ def test_terminal_execution_cannot_transition_again(client, db_session):
     invalid_response = client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "running"},
+        headers=headers,
     )
 
     assert invalid_response.status_code == 409
@@ -298,13 +385,14 @@ def test_terminal_execution_cannot_transition_again(client, db_session):
 
 
 def test_failed_transition_requires_error_type(client, db_session):
-    execution_id = create_execution_via_api(
+    execution_id, headers, _ = create_execution_via_api(
         client, db_session, "test-lifecycle-validation-001"
     )
 
     client.patch(
         f"/api/v1/executions/{execution_id}/status",
         json={"status": "running"},
+        headers=headers,
     )
 
     response = client.patch(
@@ -313,19 +401,16 @@ def test_failed_transition_requires_error_type(client, db_session):
             "status": "failed",
             "error_message": "Tool call failed",
         },
+        headers=headers,
     )
 
     assert response.status_code == 422
 
 
-from concurrent.futures import ThreadPoolExecutor
-
-
-def test_concurrent_idempotent_creation_creates_one_execution(
-    client, db_session
-):
+def test_concurrent_idempotent_creation_creates_one_execution(client, db_session):
     context = create_test_context(db_session)
     db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
 
     payload = execution_payload(
         context,
@@ -333,7 +418,7 @@ def test_concurrent_idempotent_creation_creates_one_execution(
     )
 
     def create_execution_request():
-        return client.post("/api/v1/executions", json=payload)
+        return client.post("/api/v1/executions", json=payload, headers=headers)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         responses = list(
@@ -354,12 +439,7 @@ def test_concurrent_idempotent_creation_creates_one_execution(
 
     assert len(execution_ids) == 1
 
-    execution_count = db_session.query(
-        __import__(
-            "agentops_api.models.core",
-            fromlist=["Execution"],
-        ).Execution
-    ).filter_by(
+    execution_count = db_session.query(Execution).filter_by(
         session_id=context["session"].id,
         external_execution_id="test-concurrent-idempotency-001",
     ).count()
@@ -367,10 +447,8 @@ def test_concurrent_idempotent_creation_creates_one_execution(
     assert execution_count == 1
 
 
-def test_concurrent_lifecycle_transition_applies_once(
-    client, db_session
-):
-    execution_id = create_execution_via_api(
+def test_concurrent_lifecycle_transition_applies_once(client, db_session):
+    execution_id, headers, _ = create_execution_via_api(
         client,
         db_session,
         "test-concurrent-transition-001",
@@ -380,6 +458,7 @@ def test_concurrent_lifecycle_transition_applies_once(
         return client.patch(
             f"/api/v1/executions/{execution_id}/status",
             json={"status": "running"},
+            headers=headers,
         )
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -400,3 +479,142 @@ def test_concurrent_lifecycle_transition_applies_once(
     ]
 
     assert successful_responses[0].json()["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant isolation
+# ---------------------------------------------------------------------------
+
+
+def test_cross_tenant_cannot_create_execution_with_other_organization_session(
+    client, db_session
+):
+    context_a = create_test_context(db_session)
+    context_b = create_test_context(db_session)
+    db_session.commit()
+    headers_b = auth_headers(db_session, context_b["organization"].id)
+
+    response = client.post(
+        "/api/v1/executions",
+        json=execution_payload(context_a, "hijack-attempt"),
+        headers=headers_b,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Session not found"
+
+
+def test_cross_tenant_cannot_list_other_organization_executions(client, db_session):
+    _, headers_a, context_a = create_execution_via_api(
+        client, db_session, "org-a-execution"
+    )
+    context_b = create_test_context(db_session)
+    db_session.commit()
+    headers_b = auth_headers(db_session, context_b["organization"].id)
+
+    response = client.get("/api/v1/executions", headers=headers_b)
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_cross_tenant_cannot_get_other_organization_execution(client, db_session):
+    execution_id, headers_a, context_a = create_execution_via_api(
+        client, db_session, "org-a-execution-get"
+    )
+    context_b = create_test_context(db_session)
+    db_session.commit()
+    headers_b = auth_headers(db_session, context_b["organization"].id)
+
+    response = client.get(f"/api/v1/executions/{execution_id}", headers=headers_b)
+
+    assert response.status_code == 404
+
+
+def test_cross_tenant_cannot_transition_other_organization_execution(client, db_session):
+    execution_id, headers_a, context_a = create_execution_via_api(
+        client, db_session, "org-a-execution-transition"
+    )
+    context_b = create_test_context(db_session)
+    db_session.commit()
+    headers_b = auth_headers(db_session, context_b["organization"].id)
+
+    response = client.patch(
+        f"/api/v1/executions/{execution_id}/status",
+        json={"status": "running"},
+        headers=headers_b,
+    )
+
+    assert response.status_code == 404
+
+    # Confirm the hijack attempt genuinely did not mutate the execution.
+    unaffected = client.get(f"/api/v1/executions/{execution_id}", headers=headers_a)
+    assert unaffected.json()["status"] == "queued"
+
+
+def test_cross_tenant_cannot_create_execution_with_other_organization_agent(
+    client, db_session
+):
+    context_a = create_test_context(db_session)
+    context_b = create_test_context(db_session)
+    db_session.commit()
+    headers_b = auth_headers(db_session, context_b["organization"].id)
+
+    # Use org B's own session but reference org A's agent.
+    payload = execution_payload(context_b, "cross-tenant-agent")
+    payload["agent_id"] = str(context_a["agent"].id)
+
+    response = client.post("/api/v1/executions", json=payload, headers=headers_b)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Agent not found"
+
+
+# ---------------------------------------------------------------------------
+# Project- and environment-restricted API keys
+# ---------------------------------------------------------------------------
+
+
+def test_environment_restricted_key_can_create_execution_in_its_environment(
+    client, db_session
+):
+    context = create_test_context(db_session)
+    db_session.commit()
+    headers = auth_headers(
+        db_session,
+        context["organization"].id,
+        environment_id=context["environment"].id,
+    )
+
+    response = client.post(
+        "/api/v1/executions",
+        json=execution_payload(context, "scoped-execution"),
+        headers=headers,
+    )
+
+    assert response.status_code == 201
+
+
+def test_environment_restricted_key_cannot_access_execution_in_sibling_environment(
+    client, db_session
+):
+    execution_id, _, context = create_execution_via_api(
+        client, db_session, "sibling-env-execution"
+    )
+
+    sibling_environment = Environment(
+        project_id=context["project"].id,
+        name="Staging",
+        slug=f"staging-{uuid4().hex[:8]}",
+    )
+    db_session.add(sibling_environment)
+    db_session.flush()
+    db_session.commit()
+
+    scoped_headers = auth_headers(
+        db_session, context["organization"].id, environment_id=sibling_environment.id
+    )
+
+    response = client.get(f"/api/v1/executions/{execution_id}", headers=scoped_headers)
+
+    assert response.status_code == 404

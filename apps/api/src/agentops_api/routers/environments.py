@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
+from agentops_api.auth import AuthContext, get_auth_context
 from agentops_api.db import get_db
-from agentops_api.models.core import Environment
 from agentops_api.schemas.environment import (
     EnvironmentCreate,
     EnvironmentResponse,
@@ -17,6 +17,7 @@ from agentops_api.services.environment_service import (
     list_environments,
     update_environment,
 )
+from agentops_api.services.tenant_scope import get_scoped_environment
 
 
 router = APIRouter(prefix="/api/v1/environments", tags=["environments"])
@@ -30,9 +31,10 @@ router = APIRouter(prefix="/api/v1/environments", tags=["environments"])
 def create_environment_endpoint(
     data: EnvironmentCreate,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     try:
-        environment = create_environment(db, data)
+        environment = create_environment(db, data, auth)
 
         db.commit()
         db.refresh(environment)
@@ -41,7 +43,7 @@ def create_environment_endpoint(
 
     except EnvironmentValidationError as exc:
         db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc))
 
     except IntegrityError:
         db.rollback()
@@ -57,16 +59,20 @@ def list_environments_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    return list_environments(db, project_id=project_id, limit=limit, offset=offset)
+    return list_environments(
+        db, auth=auth, project_id=project_id, limit=limit, offset=offset
+    )
 
 
 @router.get("/{environment_id}", response_model=EnvironmentResponse)
 def get_environment(
     environment_id: UUID,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    environment = db.get(Environment, environment_id)
+    environment = get_scoped_environment(db, environment_id, auth)
 
     if environment is None:
         raise HTTPException(status_code=404, detail="Environment not found")
@@ -79,8 +85,9 @@ def update_environment_endpoint(
     environment_id: UUID,
     data: EnvironmentUpdate,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    environment = db.get(Environment, environment_id)
+    environment = get_scoped_environment(db, environment_id, auth)
 
     if environment is None:
         raise HTTPException(status_code=404, detail="Environment not found")

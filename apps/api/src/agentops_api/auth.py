@@ -6,11 +6,17 @@ trusted :class:`AuthContext`. Nothing downstream may trust an
 or query string - the values on ``AuthContext`` are the only tenant identity
 a protected endpoint or service may rely on.
 
-This module intentionally does not scope any resource query itself - wiring
-``AuthContext`` into the registry/execution/telemetry routers and services is
-Milestone 5-D. Until that lands, nothing in the application depends on
-``get_auth_context`` yet, so there is no endpoint that authenticates a key but
-still allows unscoped cross-organization access.
+This module does not scope any resource query itself - wiring ``AuthContext``
+into the registry/execution/telemetry routers and services is Milestone 5-D.
+
+One exception: an API key may be restricted to an ``environment_id`` without
+an explicit ``project_id`` (M5-B allows creating such a key). Since
+``environment_id`` always implies a single owning project, ``AuthContext``
+derives that project here, once, so every downstream project-scope check can
+simply read ``AuthContext.project_id`` without re-deriving it. The derivation
+fails closed: if the environment cannot be loaded, authentication fails
+entirely rather than ever falling back to treating the key as project- or
+organization-unrestricted.
 """
 
 import logging
@@ -21,6 +27,7 @@ from fastapi import BackgroundTasks, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session as DBSession
 
 from agentops_api.db import SessionLocal, get_db
+from agentops_api.models.core import ApiKey, Environment
 from agentops_api.services.api_key_service import touch_last_used, verify_api_key
 
 
@@ -81,6 +88,25 @@ def _run_touch_last_used(api_key_id: UUID) -> None:
         db.close()
 
 
+def _effective_project_id(db: DBSession, record: ApiKey) -> UUID | None:
+    """The project this key is confined to, deriving it from environment_id
+    when the key itself only stores an environment restriction.
+
+    Fails closed: if the key has environment_id set but no project_id, and the
+    environment cannot be loaded, raises 401 rather than returning None (which
+    would be misread downstream as "no project restriction").
+    """
+    if record.environment_id is None or record.project_id is not None:
+        return record.project_id
+
+    environment = db.get(Environment, record.environment_id)
+
+    if environment is None:
+        raise _unauthorized()
+
+    return environment.project_id
+
+
 def get_auth_context(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
@@ -89,8 +115,8 @@ def get_auth_context(
     """FastAPI dependency: authenticate the request and return a trusted context.
 
     Raises HTTP 401 for any failure - missing header, malformed header, unknown
-    key, wrong secret, revoked key, or expired key - with the same generic detail
-    message in every case.
+    key, wrong secret, revoked key, expired key, or an unresolvable scope
+    restriction - with the same generic detail message in every case.
     """
     raw_key = _extract_bearer_token(authorization)
 
@@ -99,11 +125,13 @@ def get_auth_context(
     if record is None:
         raise _unauthorized()
 
+    project_id = _effective_project_id(db, record)
+
     background_tasks.add_task(_run_touch_last_used, record.id)
 
     return AuthContext(
         api_key_id=record.id,
         organization_id=record.organization_id,
-        project_id=record.project_id,
+        project_id=project_id,
         environment_id=record.environment_id,
     )

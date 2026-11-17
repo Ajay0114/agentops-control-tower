@@ -1,0 +1,1 @@
+uvicorn agentops_api.main:app --app-dir apps/api/src --reload --host 0.0.0.0 --port 8010

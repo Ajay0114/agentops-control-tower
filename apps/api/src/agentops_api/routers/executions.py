@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
+from agentops_api.auth import AuthContext, get_auth_context
 from agentops_api.db import get_db
 from agentops_api.models.core import Execution
 from agentops_api.schemas.execution import (
@@ -23,6 +24,7 @@ from agentops_api.services.execution_service import (
     transition_execution,
     validate_idempotent_request,
 )
+from agentops_api.services.tenant_scope import get_scoped_execution, scope_execution_list
 
 
 router = APIRouter(prefix="/api/v1/executions", tags=["executions"])
@@ -37,9 +39,10 @@ def create_execution_endpoint(
     data: ExecutionCreate,
     response: Response,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     try:
-        execution, created = create_execution(db, data)
+        execution, created = create_execution(db, data, auth)
 
         db.commit()
         db.refresh(execution)
@@ -49,6 +52,10 @@ def create_execution_endpoint(
         )
 
         return execution
+
+    except ExecutionNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc))
 
     except ExecutionValidationError as exc:
         db.rollback()
@@ -67,6 +74,7 @@ def create_execution_endpoint(
                 db,
                 data.session_id,
                 data.external_execution_id,
+                auth,
             )
 
             if existing is not None:
@@ -92,8 +100,10 @@ def list_executions(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     statement = select(Execution).order_by(Execution.created_at.desc())
+    statement = scope_execution_list(statement, auth)
 
     if session_id is not None:
         statement = statement.where(Execution.session_id == session_id)
@@ -113,8 +123,9 @@ def list_executions(
 def get_execution(
     execution_id: UUID,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    execution = db.get(Execution, execution_id)
+    execution = get_scoped_execution(db, execution_id, auth)
 
     if execution is None:
         raise HTTPException(status_code=404, detail="Execution not found")
@@ -130,9 +141,10 @@ def update_execution_status(
     execution_id: UUID,
     data: ExecutionTransition,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     try:
-        execution = transition_execution(db, execution_id, data)
+        execution = transition_execution(db, execution_id, data, auth)
         db.commit()
         db.refresh(execution)
         return execution

@@ -5,13 +5,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
-from agentops_api.models.core import (
-    Agent,
-    AgentVersion,
-    Execution,
-    Session,
-)
+from agentops_api.auth import AuthContext
+from agentops_api.models.core import Execution
 from agentops_api.schemas.execution import ExecutionCreate, ExecutionTransition
+from agentops_api.services.tenant_scope import (
+    get_scoped_agent,
+    get_scoped_agent_version_by_id,
+    get_scoped_session,
+    scope_execution_list,
+)
 
 
 ALLOWED_TRANSITIONS = {
@@ -24,11 +26,13 @@ ALLOWED_TRANSITIONS = {
 
 
 class ExecutionNotFoundError(Exception):
-    pass
+    """The execution itself, or a referenced resource, does not exist or is
+    outside the authenticated key's scope (404)."""
 
 
 class ExecutionValidationError(Exception):
-    pass
+    """The request body is self-contradictory (422) - independently valid,
+    in-scope references that don't actually relate to each other."""
 
 
 class ExecutionIdempotencyConflictError(Exception):
@@ -43,13 +47,18 @@ def find_existing_execution(
     db: DBSession,
     session_id: UUID,
     external_execution_id: str,
+    auth: AuthContext,
 ) -> Execution | None:
-    return db.execute(
+    """Tenant-scoped on its own merits - does not rely on the caller having
+    already validated session_id's ownership before calling this."""
+    statement = scope_execution_list(
         select(Execution).where(
             Execution.session_id == session_id,
             Execution.external_execution_id == external_execution_id,
-        )
-    ).scalar_one_or_none()
+        ),
+        auth,
+    )
+    return db.execute(statement).scalar_one_or_none()
 
 
 def validate_idempotent_request(
@@ -69,12 +78,13 @@ def validate_idempotent_request(
 def create_execution(
     db: DBSession,
     data: ExecutionCreate,
+    auth: AuthContext,
 ) -> tuple[Execution, bool]:
 
-    session = db.get(Session, data.session_id)
+    session = get_scoped_session(db, data.session_id, auth)
 
     if session is None:
-        raise ExecutionValidationError("Session not found")
+        raise ExecutionNotFoundError("Session not found")
 
     # Check for an existing execution before inserting.
     if data.external_execution_id is not None:
@@ -82,16 +92,17 @@ def create_execution(
             db,
             data.session_id,
             data.external_execution_id,
+            auth,
         )
 
         if existing is not None:
             validate_idempotent_request(existing, data)
             return existing, False
 
-    agent = db.get(Agent, data.agent_id)
+    agent = get_scoped_agent(db, data.agent_id, auth)
 
     if agent is None:
-        raise ExecutionValidationError("Agent not found")
+        raise ExecutionNotFoundError("Agent not found")
 
     if session.environment_id != agent.environment_id:
         raise ExecutionValidationError(
@@ -99,10 +110,10 @@ def create_execution(
         )
 
     if data.agent_version_id is not None:
-        version = db.get(AgentVersion, data.agent_version_id)
+        version = get_scoped_agent_version_by_id(db, data.agent_version_id, auth)
 
         if version is None:
-            raise ExecutionValidationError("Agent version not found")
+            raise ExecutionNotFoundError("Agent version not found")
 
         if version.agent_id != agent.id:
             raise ExecutionValidationError(
@@ -127,13 +138,14 @@ def transition_execution(
     db: DBSession,
     execution_id: UUID,
     data: ExecutionTransition,
+    auth: AuthContext,
 ) -> Execution:
 
-    execution = db.execute(
-        select(Execution)
-        .where(Execution.id == execution_id)
-        .with_for_update()
-    ).scalar_one_or_none()
+    statement = scope_execution_list(
+        select(Execution).where(Execution.id == execution_id), auth
+    ).with_for_update(of=Execution)
+
+    execution = db.execute(statement).scalar_one_or_none()
 
     if execution is None:
         raise ExecutionNotFoundError("Execution not found")

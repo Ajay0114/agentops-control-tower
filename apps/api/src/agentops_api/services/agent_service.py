@@ -3,16 +3,22 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
-from agentops_api.models.core import Agent, AgentVersion, Environment
+from agentops_api.auth import AuthContext
+from agentops_api.models.core import Agent, AgentVersion
 from agentops_api.schemas.agent import AgentCreate, AgentUpdate, AgentVersionCreate
+from agentops_api.services.tenant_scope import (
+    get_scoped_environment,
+    scope_agent_list,
+    scope_agent_version_list,
+)
 
 
 class AgentValidationError(Exception):
     pass
 
 
-def create_agent(db: DBSession, data: AgentCreate) -> Agent:
-    environment = db.get(Environment, data.environment_id)
+def create_agent(db: DBSession, data: AgentCreate, auth: AuthContext) -> Agent:
+    environment = get_scoped_environment(db, data.environment_id, auth)
 
     if environment is None:
         raise AgentValidationError("Environment not found")
@@ -34,12 +40,14 @@ def create_agent(db: DBSession, data: AgentCreate) -> Agent:
 def list_agents(
     db: DBSession,
     *,
+    auth: AuthContext,
     environment_id: UUID | None = None,
     agent_status: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Agent]:
     statement = select(Agent).order_by(Agent.created_at.desc())
+    statement = scope_agent_list(statement, auth)
 
     if environment_id is not None:
         statement = statement.where(Agent.environment_id == environment_id)
@@ -85,6 +93,7 @@ def list_agent_versions(
     db: DBSession,
     agent_id: UUID,
     *,
+    auth: AuthContext,
     limit: int = 50,
     offset: int = 0,
 ) -> list[AgentVersion]:
@@ -92,21 +101,8 @@ def list_agent_versions(
         select(AgentVersion)
         .where(AgentVersion.agent_id == agent_id)
         .order_by(AgentVersion.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     )
+    statement = scope_agent_version_list(statement, auth)
+    statement = statement.limit(limit).offset(offset)
 
     return list(db.execute(statement).scalars().all())
-
-
-def get_agent_version(
-    db: DBSession,
-    agent_id: UUID,
-    version_id: UUID,
-) -> AgentVersion | None:
-    return db.execute(
-        select(AgentVersion).where(
-            AgentVersion.id == version_id,
-            AgentVersion.agent_id == agent_id,
-        )
-    ).scalar_one_or_none()

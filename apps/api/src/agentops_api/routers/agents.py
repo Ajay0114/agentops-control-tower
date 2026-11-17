@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
+from agentops_api.auth import AuthContext, get_auth_context
 from agentops_api.db import get_db
-from agentops_api.models.core import Agent
 from agentops_api.schemas.agent import (
     AgentCreate,
     AgentResponse,
@@ -17,11 +17,11 @@ from agentops_api.services.agent_service import (
     AgentValidationError,
     create_agent,
     create_agent_version,
-    get_agent_version,
     list_agent_versions,
     list_agents,
     update_agent,
 )
+from agentops_api.services.tenant_scope import get_scoped_agent, get_scoped_agent_version
 
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
@@ -31,9 +31,10 @@ router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 def create_agent_endpoint(
     data: AgentCreate,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     try:
-        agent = create_agent(db, data)
+        agent = create_agent(db, data, auth)
 
         db.commit()
         db.refresh(agent)
@@ -42,7 +43,7 @@ def create_agent_endpoint(
 
     except AgentValidationError as exc:
         db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc))
 
     except IntegrityError:
         db.rollback()
@@ -59,9 +60,11 @@ def list_agents_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     return list_agents(
         db,
+        auth=auth,
         environment_id=environment_id,
         agent_status=agent_status,
         limit=limit,
@@ -70,8 +73,12 @@ def list_agents_endpoint(
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-def get_agent(agent_id: UUID, db: DBSession = Depends(get_db)):
-    agent = db.get(Agent, agent_id)
+def get_agent(
+    agent_id: UUID,
+    db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    agent = get_scoped_agent(db, agent_id, auth)
 
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -84,8 +91,9 @@ def update_agent_endpoint(
     agent_id: UUID,
     data: AgentUpdate,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    agent = db.get(Agent, agent_id)
+    agent = get_scoped_agent(db, agent_id, auth)
 
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -107,8 +115,9 @@ def create_agent_version_endpoint(
     agent_id: UUID,
     data: AgentVersionCreate,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    agent = db.get(Agent, agent_id)
+    agent = get_scoped_agent(db, agent_id, auth)
 
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -135,13 +144,14 @@ def list_agent_versions_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    agent = db.get(Agent, agent_id)
+    agent = get_scoped_agent(db, agent_id, auth)
 
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    return list_agent_versions(db, agent_id, limit=limit, offset=offset)
+    return list_agent_versions(db, agent_id, auth=auth, limit=limit, offset=offset)
 
 
 @router.get(
@@ -152,8 +162,9 @@ def get_agent_version_endpoint(
     agent_id: UUID,
     version_id: UUID,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    version = get_agent_version(db, agent_id, version_id)
+    version = get_scoped_agent_version(db, agent_id, version_id, auth)
 
     if version is None:
         raise HTTPException(status_code=404, detail="Agent version not found")

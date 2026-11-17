@@ -199,6 +199,137 @@ def test_auth_context_reflects_unrestricted_key(db_session):
     assert auth.environment_id is None
 
 
+def test_environment_only_key_derives_effective_project(db_session):
+    """A key restricted to an environment with no explicit project_id must
+    still be confined to that environment's own project - not unrestricted."""
+    context = create_org_project_environment(db_session)
+    db_session.commit()
+
+    record, raw_key = create_api_key(
+        db_session,
+        organization_id=context["organization"].id,
+        name="Environment-only key",
+        environment_id=context["environment"].id,
+    )
+    db_session.commit()
+
+    assert record.project_id is None  # stored key is genuinely unset
+
+    auth = get_auth_context(
+        background_tasks=BackgroundTasks(),
+        authorization=f"Bearer {raw_key}",
+        db=db_session,
+    )
+
+    assert auth.project_id == context["project"].id
+    assert auth.environment_id == context["environment"].id
+
+
+def test_environment_only_key_does_not_mutate_stored_key(db_session):
+    context = create_org_project_environment(db_session)
+    db_session.commit()
+
+    record, raw_key = create_api_key(
+        db_session,
+        organization_id=context["organization"].id,
+        name="Environment-only key",
+        environment_id=context["environment"].id,
+    )
+    db_session.commit()
+
+    get_auth_context(
+        background_tasks=BackgroundTasks(),
+        authorization=f"Bearer {raw_key}",
+        db=db_session,
+    )
+
+    db_session.expire_all()
+    refreshed = get_api_key(db_session, record.id)
+    assert refreshed.project_id is None
+
+
+def test_both_ids_set_key_is_unaffected_by_derivation(db_session):
+    context = create_org_project_environment(db_session)
+    db_session.commit()
+
+    _, raw_key = create_api_key(
+        db_session,
+        organization_id=context["organization"].id,
+        name="Both set",
+        project_id=context["project"].id,
+        environment_id=context["environment"].id,
+    )
+    db_session.commit()
+
+    auth = get_auth_context(
+        background_tasks=BackgroundTasks(),
+        authorization=f"Bearer {raw_key}",
+        db=db_session,
+    )
+
+    assert auth.project_id == context["project"].id
+    assert auth.environment_id == context["environment"].id
+
+
+def test_project_only_key_has_no_environment_restriction(db_session):
+    context = create_org_project_environment(db_session)
+    db_session.commit()
+
+    _, raw_key = create_api_key(
+        db_session,
+        organization_id=context["organization"].id,
+        name="Project-only key",
+        project_id=context["project"].id,
+    )
+    db_session.commit()
+
+    auth = get_auth_context(
+        background_tasks=BackgroundTasks(),
+        authorization=f"Bearer {raw_key}",
+        db=db_session,
+    )
+
+    assert auth.project_id == context["project"].id
+    assert auth.environment_id is None
+
+
+def test_environment_lookup_failure_during_derivation_fails_closed(
+    db_session, monkeypatch
+):
+    """If the environment backing an environment-only restriction cannot be
+    loaded, authentication must fail outright - never fall back to treating
+    the key as project- or organization-unrestricted."""
+    context = create_org_project_environment(db_session)
+    db_session.commit()
+
+    _, raw_key = create_api_key(
+        db_session,
+        organization_id=context["organization"].id,
+        name="Env-only key",
+        environment_id=context["environment"].id,
+    )
+    db_session.commit()
+
+    original_get = db_session.get
+
+    def environment_lookup_fails(model, primary_key, *args, **kwargs):
+        if model is Environment:
+            return None
+        return original_get(model, primary_key, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "get", environment_lookup_fails)
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_auth_context(
+            background_tasks=BackgroundTasks(),
+            authorization=f"Bearer {raw_key}",
+            db=db_session,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == auth_module.AUTHENTICATION_ERROR_DETAIL
+
+
 def test_auth_context_is_immutable(db_session):
     context = create_org_project_environment(db_session)
     db_session.commit()
