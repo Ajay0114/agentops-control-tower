@@ -8,6 +8,7 @@ from agentops_api.models.core import (
     Integration,
     Session,
     Execution,
+    TelemetryEventRecord,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "Integration",
     "Session",
     "Execution",
+    "TelemetryEventRecord",
 ]

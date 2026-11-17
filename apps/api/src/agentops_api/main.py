@@ -8,6 +8,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from agentops_api.config import get_settings
 from agentops_api.db import engine
 from agentops_api.routers.executions import router as executions_router
+from agentops_api.routers.telemetry import router as telemetry_router
+from fastapi.middleware.cors import CORSMiddleware
 
 
 settings = get_settings()
@@ -26,7 +28,20 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(executions_router)
+app.include_router(telemetry_router)
 
 @app.get("/", tags=["platform"])
 def root():

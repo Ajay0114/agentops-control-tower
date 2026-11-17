@@ -546,3 +546,166 @@ class Execution(Base):
         ),
         foreign_keys=lambda: [Execution.agent_version_id],
     )
+
+
+class TelemetryEventRecord(Base):
+    __tablename__ = "telemetry_events"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "event_id",
+            name="uq_telemetry_events_organization_event",
+        ),
+        ForeignKeyConstraint(
+            ["agent_version_id", "agent_id"],
+            ["agent_versions.id", "agent_versions.agent_id"],
+            name="fk_telemetry_events_version_agent",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_telemetry_events_agent_id", "agent_id"),
+        Index("ix_telemetry_events_session_id", "session_id"),
+        Index("ix_telemetry_events_execution_id", "execution_id"),
+        Index("ix_telemetry_events_event_type", "event_type"),
+        Index("ix_telemetry_events_trace_id", "trace_id"),
+        Index("ix_telemetry_events_occurred_at", "occurred_at"),
+        Index("ix_telemetry_events_organization_occurred", "organization_id", "occurred_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        nullable=False,
+    )
+
+    schema_version: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        nullable=True,
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    execution_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("executions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    source_platform: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    service_name: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
+
+    environment: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
+    operation_name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+
+    operation_kind: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    operation_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+    )
+
+    duration_ms: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+
+    trace_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+
+    span_id: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+    )
+
+    parent_span_id: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
+
+    model_usage: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    error: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    payload: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    attributes: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default="{}",
+        nullable=False,
+    )
+
+    event_data: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
