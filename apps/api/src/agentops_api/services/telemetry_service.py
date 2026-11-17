@@ -3,20 +3,31 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
+from agentops_api.auth import AuthContext
 from agentops_api.models.core import (
     Agent,
     AgentVersion,
     Environment,
-    Execution,
     Project,
-    Session,
     TelemetryEventRecord,
 )
 from agentops_api.schemas.telemetry import TelemetryEvent
+from agentops_api.services.tenant_scope import (
+    get_scoped_agent_version_by_id,
+    get_scoped_execution,
+    get_scoped_session,
+    scope_telemetry_event_list,
+)
+
+
+class TelemetryNotFoundError(Exception):
+    """A referenced resource does not exist, or is outside the authenticated
+    key's scope (404)."""
 
 
 class TelemetryValidationError(Exception):
-    pass
+    """The request body is self-contradictory (422) - independently valid,
+    in-scope references that don't actually relate to each other."""
 
 
 class TelemetryIdempotencyConflictError(Exception):
@@ -26,16 +37,28 @@ class TelemetryIdempotencyConflictError(Exception):
 def resolve_agent_ownership(
     db: DBSession,
     agent_id: UUID,
+    auth: AuthContext,
 ):
-    result = db.execute(
+    statement = (
         select(Agent, Environment, Project)
         .join(Environment, Agent.environment_id == Environment.id)
         .join(Project, Environment.project_id == Project.id)
-        .where(Agent.id == agent_id)
-    ).one_or_none()
+        .where(
+            Agent.id == agent_id,
+            Project.organization_id == auth.organization_id,
+        )
+    )
+
+    if auth.project_id is not None:
+        statement = statement.where(Environment.project_id == auth.project_id)
+
+    if auth.environment_id is not None:
+        statement = statement.where(Agent.environment_id == auth.environment_id)
+
+    result = db.execute(statement).one_or_none()
 
     if result is None:
-        raise TelemetryValidationError("Agent not found")
+        raise TelemetryNotFoundError("Agent not found")
 
     return result
 
@@ -43,16 +66,18 @@ def resolve_agent_ownership(
 def validate_event_associations(
     db: DBSession,
     data: TelemetryEvent,
+    auth: AuthContext,
 ):
     agent, environment, project = resolve_agent_ownership(
         db,
         data.agent.id,
+        auth,
     )
 
-    session = db.get(Session, data.context.session_id)
+    session = get_scoped_session(db, data.context.session_id, auth)
 
     if session is None:
-        raise TelemetryValidationError("Session not found")
+        raise TelemetryNotFoundError("Session not found")
 
     if (
         session.environment_id != environment.id
@@ -62,10 +87,10 @@ def validate_event_associations(
             "Agent and session must belong to the same project and environment"
         )
 
-    execution = db.get(Execution, data.context.execution_id)
+    execution = get_scoped_execution(db, data.context.execution_id, auth)
 
     if execution is None:
-        raise TelemetryValidationError("Execution not found")
+        raise TelemetryNotFoundError("Execution not found")
 
     if (
         execution.agent_id != agent.id
@@ -78,10 +103,10 @@ def validate_event_associations(
     version_id = data.agent.version_id
 
     if version_id is not None:
-        version = db.get(AgentVersion, version_id)
+        version = get_scoped_agent_version_by_id(db, version_id, auth)
 
         if version is None:
-            raise TelemetryValidationError("Agent version not found")
+            raise TelemetryNotFoundError("Agent version not found")
 
         if version.agent_id != agent.id:
             raise TelemetryValidationError(
@@ -96,6 +121,9 @@ def validate_event_associations(
             )
 
     elif data.agent.version is not None:
+        # agent.id here is already the tenant-scoped agent resolved above, not
+        # a raw external identifier, so no further scoping is needed on this
+        # lookup - any AgentVersion matching it is already within scope.
         version = db.execute(
             select(AgentVersion).where(
                 AgentVersion.agent_id == agent.id,
@@ -104,7 +132,7 @@ def validate_event_associations(
         ).scalar_one_or_none()
 
         if version is None:
-            raise TelemetryValidationError(
+            raise TelemetryNotFoundError(
                 "Agent version does not exist for the specified agent"
             )
 
@@ -115,15 +143,14 @@ def validate_event_associations(
 
 def find_existing_telemetry_event(
     db: DBSession,
-    organization_id: UUID,
+    auth: AuthContext,
     event_id: UUID,
 ) -> TelemetryEventRecord | None:
-    return db.execute(
-        select(TelemetryEventRecord).where(
-            TelemetryEventRecord.organization_id == organization_id,
-            TelemetryEventRecord.event_id == event_id,
-        )
-    ).scalar_one_or_none()
+    statement = scope_telemetry_event_list(
+        select(TelemetryEventRecord).where(TelemetryEventRecord.event_id == event_id),
+        auth,
+    )
+    return db.execute(statement).scalar_one_or_none()
 
 
 def validate_idempotent_telemetry_event(
@@ -139,13 +166,18 @@ def validate_idempotent_telemetry_event(
 def ingest_telemetry_event(
     db: DBSession,
     data: TelemetryEvent,
+    auth: AuthContext,
 ) -> tuple[TelemetryEventRecord, bool]:
     agent, project, version_id = validate_event_associations(
         db,
         data,
+        auth,
     )
 
-    organization_id = project.organization_id
+    # Always the authenticated caller's own organization - never derived from
+    # request payload data, even though project.organization_id is (after the
+    # scoping above) guaranteed to be the same value.
+    organization_id = auth.organization_id
 
     # Serialize the complete validated event into JSON-compatible values.
     event_data = data.model_dump(mode="json")
@@ -153,7 +185,7 @@ def ingest_telemetry_event(
     # Check for an existing event before inserting.
     existing = find_existing_telemetry_event(
         db,
-        organization_id,
+        auth,
         data.event_id,
     )
 

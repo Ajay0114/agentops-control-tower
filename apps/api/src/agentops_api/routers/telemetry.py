@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
+from agentops_api.auth import AuthContext, get_auth_context
 from agentops_api.db import get_db
 from agentops_api.schemas.telemetry import (
     TelemetryEvent,
@@ -22,12 +23,13 @@ from agentops_api.schemas.telemetry import (
 )
 from agentops_api.services.telemetry_service import (
     TelemetryIdempotencyConflictError,
+    TelemetryNotFoundError,
     TelemetryValidationError,
     find_existing_telemetry_event,
     ingest_telemetry_event,
-    resolve_agent_ownership,
     validate_idempotent_telemetry_event,
 )
+from agentops_api.services.tenant_scope import get_scoped_execution
 
 
 
@@ -46,9 +48,10 @@ def ingest_telemetry_endpoint(
     data: TelemetryEvent,
     response: Response,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     try:
-        record, created = ingest_telemetry_event(db, data)
+        record, created = ingest_telemetry_event(db, data, auth)
 
         db.commit()
         db.refresh(record)
@@ -66,6 +69,13 @@ def ingest_telemetry_endpoint(
             received_at=record.received_at,
             created=created,
         )
+
+    except TelemetryNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
     except TelemetryValidationError as exc:
         db.rollback()
@@ -86,11 +96,9 @@ def ingest_telemetry_endpoint(
 
         # Recover from a concurrent duplicate event submission.
         try:
-            _, _, project = resolve_agent_ownership(db, data.agent.id)
-
             existing = find_existing_telemetry_event(
                 db,
-                project.organization_id,
+                auth,
                 data.event_id,
             )
 
@@ -112,7 +120,7 @@ def ingest_telemetry_endpoint(
                     created=False,
                 )
 
-        except TelemetryValidationError:
+        except (TelemetryNotFoundError, TelemetryValidationError):
             pass
 
         except TelemetryIdempotencyConflictError as conflict:
@@ -144,6 +152,7 @@ def list_telemetry_events_endpoint(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     if start_time and end_time and start_time > end_time:
         raise HTTPException(
@@ -153,6 +162,7 @@ def list_telemetry_events_endpoint(
 
     return list_telemetry_events(
         db,
+        auth,
         agent_id=agent_id,
         execution_id=execution_id,
         session_id=session_id,
@@ -173,8 +183,9 @@ def list_telemetry_events_endpoint(
 def get_telemetry_event_endpoint(
     event_id: UUID,
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    record = get_telemetry_event(db, event_id)
+    record = get_telemetry_event(db, event_id, auth)
 
     if record is None:
         raise HTTPException(
@@ -194,9 +205,19 @@ def get_execution_telemetry_endpoint(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    execution = get_scoped_execution(db, execution_id, auth)
+
+    if execution is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execution not found",
+        )
+
     return list_telemetry_events(
         db,
+        auth,
         execution_id=execution_id,
         page=page,
         page_size=page_size,
@@ -212,9 +233,11 @@ def get_trace_telemetry_endpoint(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     db: DBSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     return list_telemetry_events(
         db,
+        auth,
         trace_id=trace_id,
         page=page,
         page_size=page_size,

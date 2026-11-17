@@ -23,13 +23,18 @@ def find_existing_session(
     db: DBSession,
     environment_id: UUID,
     external_session_id: str,
+    auth: AuthContext,
 ) -> Session | None:
-    return db.execute(
+    """Tenant-scoped on its own merits - does not rely on the caller having
+    already validated environment_id's ownership before calling this."""
+    statement = scope_session_list(
         select(Session).where(
             Session.environment_id == environment_id,
             Session.external_session_id == external_session_id,
-        )
-    ).scalar_one_or_none()
+        ),
+        auth,
+    )
+    return db.execute(statement).scalar_one_or_none()
 
 
 def create_session(
@@ -56,6 +61,7 @@ def create_session(
         db,
         data.environment_id,
         data.external_session_id,
+        auth,
     )
 
     if existing is not None:

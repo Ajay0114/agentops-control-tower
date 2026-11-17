@@ -36,6 +36,7 @@ from agentops_api.models.core import (
     Execution,
     Project,
     Session,
+    TelemetryEventRecord,
 )
 
 
@@ -203,3 +204,41 @@ def get_scoped_execution(db: DBSession, execution_id: UUID, auth: AuthContext) -
 
 def scope_execution_list(statement: Select, auth: AuthContext) -> Select:
     return _scope_execution(statement, auth)
+
+
+def _scope_telemetry_event(statement: Select, auth: AuthContext) -> Select:
+    # TelemetryEventRecord already has organization_id directly - no join
+    # needed for the primary tenant check. The Agent/Environment join is only
+    # added when the key is further restricted to one project or environment,
+    # so the common org-wide-key case stays a single-table filter.
+    statement = statement.where(
+        TelemetryEventRecord.organization_id == auth.organization_id
+    )
+
+    if auth.project_id is not None or auth.environment_id is not None:
+        statement = statement.join(
+            Agent, TelemetryEventRecord.agent_id == Agent.id
+        )
+
+        if auth.environment_id is not None:
+            statement = statement.where(Agent.environment_id == auth.environment_id)
+        else:
+            statement = statement.join(
+                Environment, Agent.environment_id == Environment.id
+            ).where(Environment.project_id == auth.project_id)
+
+    return statement
+
+
+def get_scoped_telemetry_event(
+    db: DBSession, event_id: UUID, auth: AuthContext
+) -> TelemetryEventRecord | None:
+    statement = _scope_telemetry_event(
+        select(TelemetryEventRecord).where(TelemetryEventRecord.event_id == event_id),
+        auth,
+    )
+    return db.execute(statement).scalar_one_or_none()
+
+
+def scope_telemetry_event_list(statement: Select, auth: AuthContext) -> Select:
+    return _scope_telemetry_event(statement, auth)

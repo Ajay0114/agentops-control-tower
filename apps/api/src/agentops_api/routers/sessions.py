@@ -55,6 +55,7 @@ def create_session_endpoint(
             db,
             data.environment_id,
             data.external_session_id,
+            auth,
         )
 
         if existing is not None:

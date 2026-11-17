@@ -6,11 +6,17 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DBSession
 
+from agentops_api.auth import AuthContext
 from agentops_api.models.core import TelemetryEventRecord
+from agentops_api.services.tenant_scope import (
+    get_scoped_telemetry_event,
+    scope_telemetry_event_list,
+)
 
 
 def list_telemetry_events(
     db: DBSession,
+    auth: AuthContext,
     *,
     agent_id: UUID | None = None,
     execution_id: UUID | None = None,
@@ -54,21 +60,24 @@ def list_telemetry_events(
         filters.append(TelemetryEventRecord.occurred_at <= end_time)
 
     total = db.scalar(
-        select(func.count())
-        .select_from(TelemetryEventRecord)
-        .where(*filters)
+        scope_telemetry_event_list(
+            select(func.count())
+            .select_from(TelemetryEventRecord)
+            .where(*filters),
+            auth,
+        )
     )
 
-    statement = (
+    statement = scope_telemetry_event_list(
         select(TelemetryEventRecord)
         .where(*filters)
         .order_by(
             TelemetryEventRecord.occurred_at.desc(),
             TelemetryEventRecord.received_at.desc(),
-        )
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        ),
+        auth,
     )
+    statement = statement.offset((page - 1) * page_size).limit(page_size)
 
     items = db.scalars(statement).all()
 
@@ -84,9 +93,6 @@ def list_telemetry_events(
 def get_telemetry_event(
     db: DBSession,
     event_id: UUID,
+    auth: AuthContext,
 ) -> TelemetryEventRecord | None:
-    return db.execute(
-        select(TelemetryEventRecord).where(
-            TelemetryEventRecord.event_id == event_id
-        )
-    ).scalar_one_or_none()
+    return get_scoped_telemetry_event(db, event_id, auth)
