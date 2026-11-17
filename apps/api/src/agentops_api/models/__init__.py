@@ -2,6 +2,7 @@ from agentops_api.models.base import Base
 from agentops_api.models.core import (
     Agent,
     AgentVersion,
+    ApiKey,
     Environment,
     Organization,
     Project,
@@ -18,6 +19,7 @@ __all__ = [
     "Environment",
     "Agent",
     "AgentVersion",
+    "ApiKey",
     "Integration",
     "Session",
     "Execution",

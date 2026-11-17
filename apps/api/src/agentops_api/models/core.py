@@ -709,3 +709,89 @@ class TelemetryEventRecord(Base):
         nullable=False,
     )
 
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    __table_args__ = (
+        Index("ix_api_keys_organization_id", "organization_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Optional narrowing: null means "any project/environment in the organization".
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    environment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("environments.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
+
+    # Non-secret, indexed lookup value: the first characters of the raw key.
+    key_prefix: Mapped[str] = mapped_column(
+        String(20),
+        unique=True,
+        nullable=False,
+    )
+
+    # SHA-256 hex digest of the full raw key. Never store the raw key itself.
+    key_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="active",
+        server_default="active",
+        nullable=False,
+    )
+
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    organization: Mapped["Organization"] = relationship()
+    project: Mapped["Project | None"] = relationship()
+    environment: Mapped["Environment | None"] = relationship()
+
