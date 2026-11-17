@@ -20,8 +20,15 @@ class AgentOpsConfig(BaseModel):
 
     endpoint: str = Field(min_length=1)
     api_key: str = Field(min_length=1, repr=False)
-    agent_id: UUID
+    # Optional: a client may be constructed without a default agent and
+    # instead identify one or more agents per-call via AgentOps.agent(...).
+    # Kept for backward compatibility with the original single-agent client.
+    agent_id: UUID | None = None
     environment: str = Field(default="development", min_length=1)
+
+    # Reported as telemetry's source.service_name - identifies the
+    # application sending events, distinct from the agent's own name.
+    service_name: str = Field(default="agentops-sdk-python", min_length=1)
 
     capture_mode: CaptureMode = "metadata_only"
 

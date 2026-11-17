@@ -36,6 +36,20 @@ def test_client_initialization(client):
     assert instance._processor is processor
 
 
+def test_custom_http_client_is_forwarded_to_transport():
+    custom_client = Mock()
+
+    with patch("agentops_sdk.client.TelemetryTransport") as transport_class, \
+         patch("agentops_sdk.client.BatchProcessor"):
+        AgentOps(
+            endpoint="http://localhost:8010",
+            api_key="test-api-key",
+            http_client=custom_client,
+        )
+
+    assert transport_class.call_args.kwargs["http_client"] is custom_client
+
+
 def test_endpoint_normalization(client):
     instance, _, _ = client
 
