@@ -10,6 +10,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import foreign, Mapped, mapped_column, relationship
 
@@ -715,6 +716,19 @@ class ApiKey(Base):
 
     __table_args__ = (
         Index("ix_api_keys_organization_id", "organization_id"),
+        # Partial unique index, not a blanket one: only *active*
+        # key_type="internal" rows are constrained to one per organization
+        # (status='active' is part of the predicate so a revoked internal
+        # key never blocks rotate_internal_key's replacement from being
+        # created) - see migration c4d9f2a6b8e1's docstring. This is what
+        # makes bootstrap_service.py's concurrent-safety guarantee hold at
+        # the database level, not just in application code.
+        Index(
+            "uq_api_keys_one_internal_per_organization",
+            "organization_id",
+            unique=True,
+            postgresql_where=text("key_type = 'internal' AND status = 'active'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -753,6 +767,21 @@ class ApiKey(Base):
     # SHA-256 hex digest of the full raw key. Never store the raw key itself.
     key_hash: Mapped[str] = mapped_column(
         String(64),
+        nullable=False,
+    )
+
+    # "integration" (default): created/managed by a platform user for the
+    # SDK or an external agent - listed and revocable through the dashboard.
+    # "internal": the single key the dashboard's own Next.js server uses to
+    # call this API (see bootstrap_service.py) - never listed, never
+    # revocable, and never returned by any dashboard-facing endpoint. This
+    # column is the structural enforcement of that separation: the key
+    # management endpoints filter on it rather than relying on a naming
+    # convention, so a future endpoint cannot accidentally expose it.
+    key_type: Mapped[str] = mapped_column(
+        String(20),
+        default="integration",
+        server_default="integration",
         nullable=False,
     )
 

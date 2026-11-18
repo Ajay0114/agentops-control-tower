@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from agentops_api.config import get_settings
 from agentops_api.models.core import Organization, Project, User, UserSession
+from agentops_api.services.organization_service import create_organization
 
 
 TOKEN_LABEL = "asess"
@@ -132,6 +133,45 @@ def create_user(
     db.flush()
 
     return user
+
+
+def signup(db: DBSession, *, organization_name: str, email: str, password: str) -> tuple[Organization, User]:
+    """Self-service signup (M8): creates a brand-new organization and its
+    first user - the admin of that organization - in one transaction.
+
+    This is the one HTTP-reachable way to create an organization or a
+    dashboard account; unlike ``create_user`` (used only by the offline
+    ``bootstrap_admin`` CLI for an *existing* organization) it must defend
+    itself the way any public signup form does: a duplicate email is
+    reported as a normal validation error, not assumed impossible. The new
+    organization is only actually persisted (via the caller's own
+    ``db.commit()``) once the user is known to be creatable - if the email
+    is already taken, the organization row is rolled back with it, so a
+    rejected signup never leaves an orphaned, user-less organization behind.
+    """
+    normalized_email = _normalize_email(email)
+
+    existing = db.execute(
+        select(User).where(User.email == normalized_email)
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        raise UserAlreadyExistsError(f"A user with email {normalized_email!r} already exists")
+
+    organization = create_organization(db, name=organization_name)
+
+    user = User(
+        organization_id=organization.id,
+        email=normalized_email,
+        password_hash=hash_password(password),
+        role="admin",
+        status="active",
+    )
+
+    db.add(user)
+    db.flush()
+
+    return organization, user
 
 
 # --- Login rate limiting -----------------------------------------------

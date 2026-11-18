@@ -12,7 +12,10 @@ import type {
   DashboardOverview,
   EnvironmentResponse,
   ExecutionResponse,
+  IntegrationApiKey,
+  IntegrationApiKeyCreateResult,
   Paginated,
+  Project,
   SessionResponse,
   TelemetryEventListResponse,
 } from "@/lib/types";
@@ -89,6 +92,19 @@ export async function login(email: string, password: string): Promise<{ user: Cu
   return data;
 }
 
+export async function signup(
+  organizationName: string,
+  email: string,
+  password: string
+): Promise<{ user: CurrentUser }> {
+  const { data } = await apiFetch<{ user: CurrentUser }>("/api/auth/signup", undefined, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-csrf-token": readCsrfCookie() },
+    body: JSON.stringify({ organization_name: organizationName, email, password }),
+  });
+  return data;
+}
+
 export async function logout(): Promise<void> {
   await apiFetch("/api/auth/logout", undefined, {
     method: "POST",
@@ -132,6 +148,30 @@ export async function fetchEnvironments(
 
 export async function fetchEnvironment(id: string): Promise<EnvironmentResponse> {
   const { data } = await apiFetch<EnvironmentResponse>(`/api/environments/${id}`);
+  return data;
+}
+
+export async function createEnvironment(params: {
+  projectId: string;
+  name: string;
+  slug: string;
+}): Promise<EnvironmentResponse> {
+  const { data } = await apiFetch<EnvironmentResponse>("/api/environments", undefined, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-csrf-token": readCsrfCookie() },
+    body: JSON.stringify({ project_id: params.projectId, name: params.name, slug: params.slug }),
+  });
+  return data;
+}
+
+// --- Projects (onboarding) ------------------------------------------------
+
+export async function createProject(name: string): Promise<Project> {
+  const { data } = await apiFetch<Project>("/api/projects", undefined, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-csrf-token": readCsrfCookie() },
+    body: JSON.stringify({ name }),
+  });
   return data;
 }
 
@@ -215,5 +255,37 @@ export async function fetchTraceEvents(
 
 export async function fetchDashboardOverview(): Promise<DashboardOverview> {
   const { data } = await apiFetch<DashboardOverview>("/api/dashboard/overview");
+  return data;
+}
+
+// --- Integration API keys (Settings) --------------------------------------
+
+export async function fetchIntegrationApiKeys(): Promise<IntegrationApiKey[]> {
+  const { data } = await apiFetch<IntegrationApiKey[]>("/api/settings/api-keys");
+  return data;
+}
+
+export async function createIntegrationApiKey(params: {
+  name: string;
+  project_id?: string;
+  environment_id?: string;
+}): Promise<IntegrationApiKeyCreateResult> {
+  const { data } = await apiFetch<IntegrationApiKeyCreateResult>(
+    "/api/settings/api-keys",
+    undefined,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-csrf-token": readCsrfCookie() },
+      body: JSON.stringify(params),
+    }
+  );
+  return data;
+}
+
+export async function revokeIntegrationApiKey(id: string): Promise<IntegrationApiKey> {
+  const { data } = await apiFetch<IntegrationApiKey>(`/api/settings/api-keys/${id}/revoke`, undefined, {
+    method: "POST",
+    headers: { "x-csrf-token": readCsrfCookie() },
+  });
   return data;
 }

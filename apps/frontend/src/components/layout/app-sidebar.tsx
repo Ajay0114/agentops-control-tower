@@ -42,10 +42,10 @@ export default function AppSidebar({ user }: { user: CurrentUser }) {
       </div>
 
       <div className="workspace">
-        <div className="workspace-avatar">{user.email.slice(0, 1).toUpperCase()}</div>
+        <div className="workspace-avatar">{user.organization_name.slice(0, 1).toUpperCase()}</div>
         <div className="workspace-info">
-          <strong>Local organization</strong>
-          <span>{user.project_id ? "Scoped to one project" : "Organization-wide access"}</span>
+          <strong>{user.organization_name}</strong>
+          <span>{user.project_name ?? "Organization-wide access"}</span>
         </div>
       </div>
 

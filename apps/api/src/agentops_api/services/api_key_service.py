@@ -66,6 +66,7 @@ def create_api_key(
     project_id: UUID | None = None,
     environment_id: UUID | None = None,
     expires_at: datetime | None = None,
+    key_type: str = "integration",
 ) -> tuple[ApiKey, str]:
     """Create a new API key record. Returns (record, raw_key).
 
@@ -121,6 +122,7 @@ def create_api_key(
             key_prefix=key_prefix,
             key_hash=_hash_key(raw_key),
             expires_at=expires_at,
+            key_type=key_type,
         )
 
         db.add(record)
@@ -185,12 +187,25 @@ def get_api_key(db: DBSession, api_key_id: UUID) -> ApiKey | None:
     return db.get(ApiKey, api_key_id)
 
 
-def list_api_keys(db: DBSession, organization_id: UUID) -> list[ApiKey]:
+def list_api_keys(
+    db: DBSession,
+    organization_id: UUID,
+    *,
+    key_type: str | None = None,
+) -> list[ApiKey]:
+    """``key_type=None`` (the default) lists every key, internal included -
+    preserved for provision_api_key.py's own CLI, which is an operator tool
+    with direct database access. The dashboard's key-management endpoints
+    must always pass ``key_type="integration"`` instead - see
+    routers/auth.py's api-keys endpoints."""
     statement = (
         select(ApiKey)
         .where(ApiKey.organization_id == organization_id)
         .order_by(ApiKey.created_at.desc())
     )
+
+    if key_type is not None:
+        statement = statement.where(ApiKey.key_type == key_type)
 
     return list(db.execute(statement).scalars().all())
 

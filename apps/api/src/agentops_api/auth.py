@@ -41,9 +41,20 @@ AUTHENTICATION_ERROR_DETAIL = "Invalid or missing API key"
 
 @dataclass(frozen=True)
 class AuthContext:
-    """The trusted identity of the caller, derived solely from a verified API key."""
+    """The trusted identity of the caller.
 
-    api_key_id: UUID
+    Derived from either a verified API key (``api_key_id`` set, the SDK and
+    every programmatic caller) or a verified dashboard session (
+    ``api_key_id`` is ``None`` - a logged-in customer browsing their own
+    data). Every resource router/service already takes this dataclass and
+    only ever reads ``organization_id``/``project_id``/``environment_id`` off
+    it (see tenant_scope.py's module docstring) - scoping a signed-up
+    customer's own dashboard session to their own organization is therefore
+    a pure addition to *how* this is constructed, not a change to what
+    anything downstream does with it.
+    """
+
+    api_key_id: UUID | None
     organization_id: UUID
     project_id: UUID | None
     environment_id: UUID | None
@@ -107,17 +118,74 @@ def _effective_project_id(db: DBSession, record: ApiKey) -> UUID | None:
     return environment.project_id
 
 
+def _session_auth_context(db: DBSession, raw_session_token: str) -> AuthContext | None:
+    """Resolves AuthContext from a dashboard session token, if valid.
+
+    A logged-in customer's own org/project (see models/core.py's User
+    docstring) becomes their tenant scope for every data request - this is
+    what lets a self-service customer view their own dashboard without any
+    API key at all, while never letting them act as a different
+    organization: the scope comes entirely from their own verified User row,
+    never from anything the browser supplies. Returns None (never raises)
+    on any failure, so the caller can fall back to the API-key path.
+    """
+    # Imported here, not at module scope: auth_service.py doesn't import
+    # from this module, so there is no real cycle, but auth.py is the most
+    # widely-imported module in the backend and keeping its own module-level
+    # import list minimal avoids ever introducing one by accident later.
+    from agentops_api.services.auth_service import validate_session
+
+    result = validate_session(db, raw_session_token)
+
+    if result is None:
+        return None
+
+    user, _session = result
+
+    return AuthContext(
+        api_key_id=None,
+        organization_id=user.organization_id,
+        project_id=user.project_id,
+        environment_id=None,
+    )
+
+
 def get_auth_context(
     background_tasks: BackgroundTasks,
     authorization: str | None = Header(default=None),
+    x_session_token: str | None = Header(default=None),
     db: DBSession = Depends(get_db),
 ) -> AuthContext:
     """FastAPI dependency: authenticate the request and return a trusted context.
 
-    Raises HTTP 401 for any failure - missing header, malformed header, unknown
-    key, wrong secret, revoked key, expired key, or an unresolvable scope
-    restriction - with the same generic detail message in every case.
+    Accepts either a logged-in dashboard session (``X-Session-Token``,
+    checked first) or this caller's own tenant-scoped API key
+    (``Authorization: Bearer``) - mirroring routers/auth.py's
+    ``get_key_management_scope``, generalized to every resource endpoint so
+    a self-service customer's own dashboard session scopes their data
+    requests to their own organization. The SDK and every other
+    programmatic caller never sends a session token, so this is purely
+    additive for them.
+
+    Raises HTTP 401 for any failure - missing/invalid session, missing
+    header, malformed header, unknown key, wrong secret, revoked key,
+    expired key, or an unresolvable scope restriction - with the same
+    generic detail message in every case.
     """
+    # isinstance, not just truthy: every existing call site in this codebase
+    # (tests, and get_key_management_scope's own fallback) calls this
+    # function directly rather than through FastAPI's dependency injection,
+    # and none of them pass x_session_token - leaving it as the unresolved
+    # `Header(default=None)` descriptor object FastAPI would otherwise
+    # resolve to a real None. That object is truthy, so a plain `if
+    # x_session_token:` would wrongly treat every such call as "a session
+    # token was provided".
+    if isinstance(x_session_token, str) and x_session_token:
+        context = _session_auth_context(db, x_session_token)
+
+        if context is not None:
+            return context
+
     raw_key = _extract_bearer_token(authorization)
 
     record = verify_api_key(db, raw_key)

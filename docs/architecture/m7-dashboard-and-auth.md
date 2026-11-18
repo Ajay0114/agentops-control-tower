@@ -22,9 +22,18 @@ uvicorn agentops_api.main:app --app-dir apps/api/src --reload --port 8010
 # Frontend
 cd apps/frontend
 npm install
-cp .env.example .env.local   # fill in AGENTOPS_API_KEY - see section 5
+cp .env.example .env.local   # starting point - the backend fills in AGENTOPS_API_KEY for you
 npm run dev                  # http://localhost:3000
 ```
+
+> **Zero-config local onboarding (new in the M7 follow-up)**: the steps above
+> are now genuinely all you need. The backend auto-bootstraps an initial
+> organization/project/environment and an internal API key on first startup
+> and writes that key into `apps/frontend/.env.local` for you - no manual
+> `bootstrap_admin.py`/`provision_api_key.py` step, and no login, are required
+> to see the dashboard with real (if initially empty) data. See section 11 for
+> how this works, and section 2 below for the *separate*, still-fully-
+> supported path for a real local administrator account.
 
 > **WSL note**: if you run the frontend inside WSL2 against a directory
 > mounted from Windows (a `/mnt/c/...` or `/mnt/d/...` path), `next build`
@@ -216,7 +225,8 @@ No new required variables. Two new optional settings with sensible defaults
 | Variable | Server-only? | Meaning |
 |---|---|---|
 | `BACKEND_API_URL` | Yes | FastAPI base URL (default `http://localhost:8010`) |
-| `AGENTOPS_API_KEY` | Yes | A tenant-scoped API key provisioned via `provision_api_key.py create-key` (see section 2, step 3). **Never** exposed to the browser - read only from `src/lib/server/env.ts`, which is `server-only`-guarded. |
+| `AGENTOPS_API_KEY` | Yes | The internal dashboard key. Normally written automatically by the backend's first-run bootstrap (section 11); only provision it by hand via `provision_api_key.py create-key` if you need to override that. **Never** exposed to the browser - read only from `src/lib/server/env.ts`, which is `server-only`-guarded. |
+| `LOCAL_AUTH_BYPASS` | Yes | `"true"` skips login entirely for local development (section 11.1). Defaults to off; structurally ignored whenever `NODE_ENV==="production"`, regardless of this value. |
 
 Both are plain (non-`NEXT_PUBLIC_`) variables, so Next.js never inlines them
 into the client bundle. The frontend has no other required configuration -
@@ -330,6 +340,19 @@ resolution stub needed only under Vitest - Next.js's own bundler tolerates
 the package's packaging quirk fine - and a `renderAsync` helper for pages
 that call React's `use()` on their `params` prop).
 
+The M7 follow-up (local dev mode + API key management, section 11-13) added:
+`tests/test_bootstrap.py` (first-run bootstrap, idempotency, a real 5-thread
+concurrency test, internal-key rotation/recovery), `tests/test_api_keys.py`
+(integration-key create/list/revoke, scope enforcement, the session-or-API-key
+dual-credential fallback), `src/lib/server/env.test.ts` and `session.test.ts`
+(the bypass flag's own logic, including its production fail-closed guarantee),
+new cases in `src/proxy.test.ts` (the same guarantee at the middleware layer),
+and `src/components/settings/api-keys-section.test.tsx` (the Settings UI,
+including that the raw key is rendered only immediately after creation and
+never again). `src/test/server-only-stub.ts` and `set-node-env.ts` are shared
+test infrastructure these needed, added the same way as the existing
+`lucide-react` stub.
+
 ## 10. Known limitations
 
 - **Login rate limiting is per-process and in-memory** (see 3.3): it resets
@@ -358,3 +381,357 @@ that call React's `use()` on their `params` prop).
   "multi-user invitation workflows" and "advanced organization administration."
 - **`apps/frontend/env.local`** (see section 5's note) is pre-existing dead
   configuration, left untouched.
+- **The local dashboard is single-user, not a multi-user authorization
+  model.** With `LOCAL_AUTH_BYPASS` on, every browser session is the same
+  synthetic local user, and all key-management operations run under one
+  fixed, server-side internal API key scoped to one project/environment
+  (section 11-12). There are no per-person permissions, invitations, or
+  audit trail of "who revoked this key" beyond what the database's own
+  `created_at`/`revoked_at` timestamps show. This is an explicit, documented
+  limitation of the current local-dev convenience feature, not an oversight -
+  a real multi-user deployment keeps auth enabled (bypass off) and relies on
+  the pre-existing `User`/`UserSession` model from section 3.
+
+## 11. Local development mode: auth bypass and automatic bootstrap
+
+This section covers the M7 follow-up ("Additional M7 Requirements - Local
+Development Mode and API Key Management"): removing the need to manually
+create an admin account and an API key before seeing the dashboard, while
+keeping the full M7 auth system intact and re-enablable for a real
+deployment.
+
+### 11.1 `LOCAL_AUTH_BYPASS` - the login gate, not the authorization model
+
+`LOCAL_AUTH_BYPASS=true` in `apps/frontend/.env.local` makes
+`getCurrentUser()` (`src/lib/server/session.ts`) return a fixed synthetic
+user (`LOCAL_BYPASS_USER`, `src/lib/server/env.ts`) immediately, without
+reading a cookie or calling the backend at all - every existing call site
+(`requireUserOrRedirect`, every `/api/*` route) benefits automatically,
+since this is the one function they all already funnel through. `src/proxy.ts`
+carries a duplicate of the same check (it can't import `env.ts` - see the
+existing note on `server-only` vs. Vitest/jsdom in section 6) so the
+`/login` page itself redirects to `/` instead of rendering a form that would
+never be needed.
+
+**This changes nothing about authorization.** It only decides who
+`getCurrentUser()` says is logged in; the backend's own tenant isolation
+(`tenant_scope.py`, `AuthContext`) is completely unaffected and is not
+even aware this flag exists - every data request this dashboard makes is
+still authorized the normal M5 way, by the internal API key (section 12).
+
+**Fail-closed, structurally, not just by convention**: the check is
+`LOCAL_AUTH_BYPASS === "true" && process.env.NODE_ENV !== "production"`.
+`NODE_ENV` is not an app-configurable value - Next.js itself forces it to
+`"production"` for `next build`/`next start`, so there is no environment-
+variable misconfiguration that enables this in a real deployment. Verified
+three ways: unit tests (`env.test.ts`, `session.test.ts`, `proxy.test.ts`)
+assert the bypass stays off under a forced production `NODE_ENV`; and an
+actual `next build && next start` with `LOCAL_AUTH_BYPASS=true` in
+`.env.local` was run end-to-end, confirming the production server still
+redirects a protected page to `/login` and does not redirect `/login` away.
+
+### 11.2 First-run bootstrap (`services/bootstrap_service.py`)
+
+On backend startup (a FastAPI `lifespan` hook in `main.py`, gated on
+`settings.app_env == "local"` and skipped under pytest via the
+auto-set `PYTEST_CURRENT_TEST` env var, so the test suite never touches the
+real database), `ensure_local_bootstrap()` ensures, in order, that an
+organization (slug `local-default`), a project (`local-default`), a
+development environment (`development`), and one active internal API key
+all exist - reusing the *existing* M4/M5 org/project/environment models and
+the *existing* `create_api_key`/`verify_api_key`/`revoke_api_key` services
+unchanged. Nothing here is a new authorization primitive; it is the same
+`ApiKey` row M5 already had, with a new `key_type` column (`"internal"` vs.
+the default `"integration"`) distinguishing it from a normal SDK key.
+
+**Idempotency and concurrency** are both enforced at the database level, not
+just in application logic - a check-then-insert that merely *looks*
+idempotent is racy under real concurrent startup:
+
+- Org/project/environment already had unique `slug` constraints; a shared
+  `_get_or_create()` helper retries on `IntegrityError`/`OperationalError`
+  (a genuine Postgres deadlock under concurrent inserts is possible and must
+  be retried, not just a uniqueness violation).
+- The internal key additionally needed a **new** partial unique index,
+  `uq_api_keys_one_internal_per_organization` (migration `c4d9f2a6b8e1`) -
+  `UNIQUE (organization_id) WHERE key_type='internal' AND status='active'`.
+  Without it, two threads racing "no internal key yet" → create both succeed,
+  since `ApiKey.name` itself was never unique. This was caught by, not
+  designed away from: `tests/test_bootstrap.py`'s concurrency test spawns 5
+  real threads against 5 real sessions on the same test database and asserts
+  exactly one of them actually created a key - it failed intermittently
+  before the index was added, and is green across repeated full-suite runs
+  since.
+- The predicate includes `status='active'` deliberately (not just
+  `key_type='internal'`): a revoked-then-replaced internal key must stop
+  counting toward the constraint, or rotation (11.4) could never create its
+  replacement.
+
+### 11.3 How the internal key reaches the Next.js server
+
+Preferred path, fully automatic: `try_write_frontend_env_local()` merges
+`BACKEND_API_URL` and the newly-created raw key into
+`apps/frontend/.env.local` (preserving any other lines already there), the
+moment the bootstrap creates a *new* key - never on a run that found an
+existing one, so restarting the backend never rewrites or regenerates
+anything. The raw value is **never logged**; only the key's id appears in
+the one log line confirming a key was created. `.env.local` was already
+gitignored before this phase (see section 5).
+
+If that write fails (e.g. a read-only filesystem, or `apps/frontend` not
+present next to `apps/api` in this checkout) it's caught, logged as a
+warning with no secret in it, and the documented fallback - a one-time CLI
+command - takes over; automatic provisioning degrading to a manual step is
+an explicit, acceptable fallback per the brief, not a silent failure.
+
+### 11.4 Recovery and rotation (`apps/api/scripts/bootstrap_local_dev.py`)
+
+```bash
+# Re-run the idempotent bootstrap and (re-)write .env.local - safe to run
+# any time, including if .env.local was deleted or you're missing it after
+# cloning onto a machine that already has the database:
+python apps/api/scripts/bootstrap_local_dev.py --backend-url http://localhost:8010
+
+# Revoke the current internal key and mint + provision a fresh one (the
+# correct way to rotate - there is no "regenerate from an old secret"):
+python apps/api/scripts/bootstrap_local_dev.py --rotate
+
+# Print the raw key once instead of writing .env.local (e.g. to paste into
+# a different tool's config by hand); it is never logged otherwise:
+python apps/api/scripts/bootstrap_local_dev.py --print-key
+```
+
+`--rotate` calls `rotate_internal_key()`, which revokes the existing
+internal key via the *existing, unmodified* `revoke_api_key()` and only then
+creates a replacement - the same revoke-then-create-new process the API key
+management UI uses for integration keys (section 12), kept consistent on
+purpose.
+
+## 12. API key management
+
+### 12.1 Internal vs. integration keys
+
+Both are `ApiKey` rows using the same M5 table, generation, hashing
+(SHA-256 of a high-entropy token - see section 3.2's justification, which
+applies equally here), and verification/revocation code. The only new thing
+is `key_type`:
+
+| | `internal` | `integration` (default) |
+|---|---|---|
+| Created by | The backend's own bootstrap/rotation (11.2-11.4) | A platform user, via Settings → API Keys |
+| Used by | This app's Next.js server only, to call its own backend | The Python SDK / external agents |
+| Visible in the Settings UI? | **Never** - excluded by `key_type="integration"` filters in every list/revoke query | Yes |
+| Scope | One fixed project/environment (the bootstrap's own) | Chosen at creation (org-wide, or narrowed to a project/environment the caller's scope actually owns) |
+
+An internal key can never be listed or revoked through the integration-key
+endpoints (`GET/POST /api/v1/auth/api-keys`, `POST .../revoke` -
+`routers/auth.py`): each query is always filtered to
+`key_type="integration"`, and the revoke lookup additionally 404s (not 403 -
+indistinguishable from "doesn't exist") on any key that isn't both
+integration-typed and in the caller's own organization.
+
+### 12.2 Authorizing key-management requests under the bypass
+
+The Settings page's API-key endpoints need *some* credential even when
+`LOCAL_AUTH_BYPASS` means there's no real login session. Rather than teach
+the backend anything about the frontend's bypass concept, `auth.py`'s
+`get_key_management_scope` dependency accepts **either**: a valid
+`X-Session-Token` (checked first), **or** falls back to the same tenant-API-
+key `AuthContext` the SDK itself uses (`Authorization: Bearer ...`). The
+frontend's `keyManagementRequest()` helper sends a session token when one
+exists and the internal API key otherwise - so this works identically
+whether a real person is logged in or the bypass is active, with no special
+casing either side needs to know about.
+
+> **Operational note verified live**: if a real session cookie set on
+> `localhost` by an earlier *login* ever outlives the tab that created it,
+> it is still sent on any `localhost` port, bypass or not - cookies aren't
+> port-scoped. Because session tokens are checked first by design (future
+> multi-user support should prefer a real session over a shared key), that
+> stale session - not the internal key - determines the key-management
+> scope until it's logged out or expires. This surfaced during this
+> feature's own live verification and is working as designed, not a bug;
+> worth knowing if Settings ever appears to show the "wrong" organization's
+> keys in a long-lived local browser profile.
+
+### 12.3 The Settings UI (`src/components/settings/api-keys-section.tsx`)
+
+List, create (name only - project/environment scope defaults to the
+caller's own, and a browser-supplied `organization_id` is rejected outright
+by the schema's `extra="forbid"`), and revoke (behind an inline "Revoke this
+key? Confirm/Cancel" step - no destructive action fires on the first click).
+The raw key is shown exactly once, immediately after creation, in a
+dismissible callout with a copy button and an explicit "cannot be shown
+again" notice; closing it or reloading the page cannot bring it back,
+because the raw value was never persisted anywhere to begin with (section
+3.2/12.1's hashing is unchanged) - the UI has nothing to re-fetch.
+Regeneration from an old key is not a feature that exists: revoke, then
+create a new one, same as 11.4's own rotation path.
+
+## 13. Python SDK onboarding
+
+Immediately after creating an integration key, the Settings UI shows (via
+`src/components/settings/sdk-onboarding-guide.tsx`, collapsed by default
+under "How do I use this with the Python SDK?"): the install command
+(`pip install agentops-sdk-python`), exporting `AGENTOPS_API_KEY` /
+`AGENTOPS_ENDPOINT` as environment variables, and a minimal example using
+the SDK's actual M6 public API - `AgentOps(endpoint=..., api_key=...)`,
+`.agent(id, version=...)`, `.start_execution(agent=..., session_id=...)`,
+and the `llm_call`/`tool_call` telemetry context managers - ending with a
+pointer to the SDK's own README for async usage and its full
+privacy/security model. The example always uses a placeholder
+(`"<the key you just copied above>"`); the real key is never written into
+documentation or example code, only ever shown once in the callout above it.
+
+## 14. Security and deployment boundaries (updated)
+
+Restating section 3's boundary with this phase's additions:
+
+- The local-auth bypass (11.1) only ever decides who the *frontend* thinks
+  is logged in. It cannot widen, and was not designed to interact with, the
+  backend's own tenant isolation - that boundary is exactly as it was after
+  M5, re-confirmed by re-running the full pre-existing test suite (section
+  9) alongside this phase's new tests.
+- The bypass is refused outside local development by construction
+  (`NODE_ENV`), not by a flag the operator has to remember to unset - see
+  11.1 for how this was verified end-to-end, not just unit-tested.
+- The internal key never leaves the server: it is read only in
+  `src/lib/server/proxy.ts`/`backend.ts` (both `server-only`-guarded, same
+  mechanism as the pre-existing `AGENTOPS_API_KEY` in section 4.4), never
+  rendered in any page, and never returned by any API route - the Settings
+  UI's key list always filters it out at the database query level (12.1),
+  not just in the UI layer, so there is no endpoint that could leak it even
+  if the frontend had a bug.
+- The Python SDK's own authentication is completely unchanged: normal
+  `Authorization: Bearer <integration key>`, verified by the same
+  `get_auth_context`/`AuthContext` dependency it always used.
+- See section 10's new bullet: the local-auth-bypass mode itself remains a
+  single-user local convenience layer. Section 15 below covers the separate,
+  now-multi-tenant self-service signup path, which supersedes that
+  limitation for the normal (bypass-off) case.
+
+## 15. Self-service customer onboarding (M8)
+
+This section covers the M8 milestone: replacing the fixed single
+"Local Organization" experience with real, customer-created organizations -
+signup, project, environment, and integration key, each a genuinely new
+tenant rather than a shared local default - while keeping M1-M7's tenant
+isolation and the M7-follow-up's local-dev conveniences (sections 1-14)
+fully intact and unaffected.
+
+### 15.1 The one architectural change: `AuthContext` also accepts a session
+
+Every resource router (agents, executions, sessions, environments,
+telemetry, dashboard) already depended on `get_auth_context` returning an
+`AuthContext` (organization/project/environment id) built from a verified
+API key (section 3.1). `agentops_api/auth.py`'s `get_auth_context` now
+*also* accepts an `X-Session-Token` header, tried first: when it resolves
+to a valid `UserSession`, `AuthContext` is built from that session's own
+`User.organization_id`/`project_id` instead (`api_key_id` is `None` in
+this case - the one field only ever used for the API-key-only
+`last_used_at` bookkeeping). This mirrors the M7-follow-up's
+`get_key_management_scope` (section 12.2), generalized to every resource
+endpoint rather than only API-key management.
+
+**This is a pure addition, not a rewrite.** `tenant_scope.py` and every
+resource service (`environment_service.create_environment`,
+`agent_service.create_agent`, etc.) already took `AuthContext` and only
+ever read its three tenant-id fields - none of them changed at all. A
+signed-up customer's own dashboard session now flows through literally the
+same scoping code the SDK's API keys always used; the only new code is
+*how* `AuthContext` gets constructed. The SDK itself, and every existing
+API-key caller, is entirely unaffected - they never send a session token,
+so this new branch never activates for them (confirmed by the existing
+356+-test regression suite passing unchanged, plus the dual-credential
+priority tests in `tests/test_signup.py` and `tests/test_api_keys.py`).
+
+### 15.2 Signup (`POST /api/v1/auth/signup`, `services/auth_service.signup`)
+
+Creates a brand-new `Organization` (via the new
+`services/organization_service.create_organization`, which auto-derives a
+URL-safe slug from the customer's free-text organization name, retrying
+with a random suffix only on a collision - a customer is never asked to
+invent a slug) and its first `User` (role `admin`) in one transaction,
+then immediately logs them in (`create_session`, the same call `/login`
+makes) - a first-time customer lands on the onboarding wizard with no
+separate login step. A duplicate email is rejected (409) before the
+organization is even inserted, so a rejected signup never leaves an
+orphaned, user-less organization behind (`tests/test_signup.py`).
+
+`UserResponse` (returned by signup, login and `/me`) now also carries
+`organization_name`/`project_name`, read via the existing
+`User.organization`/`User.project` relationships (`UserResponse.from_user`)
+- purely a display convenience: the dashboard's sidebar and Settings page
+now show the customer's own organization name instead of the old hardcoded
+"Local organization" string, and still never use these for authorization.
+
+### 15.3 Project creation (`POST /api/v1/projects`, `services/organization_service.create_project`)
+
+The one other genuinely new write. Scoped entirely by the caller's own
+`AuthContext.organization_id` - never a request body field - exactly like
+`environment_service.create_environment` already was; rejected if the
+caller's identity is already narrowed to one project/environment, the same
+check `create_environment` makes. Slugs are auto-derived the same way
+organizations' are.
+
+### 15.4 Environment and integration-key creation: zero new code
+
+`POST /api/v1/environments` (M4) and the integration-key endpoints (M7
+follow-up, section 12) needed **no changes at all** - once a logged-in
+customer's session resolves to their own `AuthContext` (15.1), these
+pre-existing, already-tested endpoints work for them automatically. The
+onboarding wizard (`src/components/onboarding/onboarding-wizard.tsx`) is a
+three-step client-side flow - create project, create environment, then the
+*existing* `ApiKeysSection`/`SdkOnboardingGuide` components (section
+12.3/13), embedded unchanged - backed by two new Next.js routes
+(`/api/projects`, and a `POST` added to the existing `/api/environments`
+route) that both go through `src/lib/server/proxy.ts`'s new `proxyMutate`
+helper: session-gated, CSRF-checked, forwarded via `backendRequest`.
+
+### 15.5 How the dashboard's own backend calls became per-customer
+
+`src/lib/server/backend.ts`'s `backendRequest` - the single function every
+proxied `/api/*` route handler already went through - now sends the
+caller's own dashboard session token (`X-Session-Token`) when one exists,
+falling back to this deployment's internal API key only when there is none
+(the local-auth-bypass case, section 11). This is the frontend half of
+15.1: it is what makes a signed-up customer's *browser* session - not just
+direct API calls - see only their own organization's agents, executions,
+traces and telemetry. `keyManagementRequest` (section 12.2) was simplified
+to call the same `backendRequest`, removing what had been its own
+duplicate copy of this credential-selection logic.
+
+### 15.6 Validated tenant isolation (two independent customers)
+
+`tests/test_signup.py::test_two_separately_signed_up_customers_have_fully_isolated_dashboards`
+signs up two customers end-to-end (organization, project, environment,
+integration key), registers one agent each via their own key, and asserts
+each customer's own **session** (the dashboard's actual code path, not
+just their API key) sees only their own agent in `GET /api/v1/agents`,
+only their own count in `GET /api/v1/dashboard/overview`, and only their
+own key in `GET /api/v1/auth/api-keys`.
+
+This was additionally verified live, end-to-end, through the real browser
+UI and the real `agentops_sdk` package (not mocked): two customers signed
+up through `/signup`, each completed the onboarding wizard, each key was
+used to register a real agent and send a real execution plus `llm_call`/
+`tool_call` telemetry through the SDK exactly as section 13 documents it,
+and each customer's own dashboard (Agents, Overview, Settings -> API Keys)
+was confirmed to show only their own data - including one incidental,
+expected observation: a stale session cookie from an earlier customer's
+login, if not explicitly logged out, would continue to resolve to *that*
+customer under `AuthContext`'s session-first priority (the same behavior
+already documented for key management in section 12.2) - ordinary browser
+cookie behavior, not a tenant-isolation gap, and the login/logout flow
+already clears it.
+
+### 15.7 What is still out of scope
+
+No invitation flow (a second person joining an existing organization),
+no role/permission tiers beyond the single `admin` every signup creates
+(same limitation as section 10's pre-existing bullet), no "create an
+additional organization" affordance for an already-logged-in user, and no
+self-service password reset. None of these were asked for by the M8 brief,
+which scopes the customer journey to exactly: signup, organization,
+project, environment, integration key, SDK connection, telemetry, and
+dashboard visibility.

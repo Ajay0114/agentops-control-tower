@@ -34,3 +34,44 @@ export const CSRF_COOKIE_NAME = "agentops_csrf";
 export const CSRF_HEADER_NAME = "x-csrf-token";
 
 export const isProduction = process.env.NODE_ENV === "production";
+
+/**
+ * Whether local login can be skipped entirely. This is a two-part,
+ * fail-closed check - BOTH must hold, and neither can be forced by
+ * anything a browser request supplies:
+ *
+ * 1. `LOCAL_AUTH_BYPASS=true` - an explicit, deliberate operator opt-in.
+ *    Off by default.
+ * 2. `process.env.NODE_ENV !== "production"` - Next.js itself sets this to
+ *    "production" for `next build`/`next start`, and to "development" for
+ *    `next dev`. This is not a value anything in this app's own config can
+ *    override, which is what makes it an actual security boundary rather
+ *    than another flag someone could mis-set: a production build *cannot*
+ *    bypass login, full stop, regardless of what LOCAL_AUTH_BYPASS is set
+ *    to in its environment.
+ *
+ * The existing session/cookie/CSRF login implementation is untouched and
+ * fully intact behind this - see lib/server/session.ts's getCurrentUser(),
+ * which is the only place this flag is actually consulted.
+ */
+export function isLocalAuthBypassActive(): boolean {
+  return process.env.LOCAL_AUTH_BYPASS === "true" && process.env.NODE_ENV !== "production";
+}
+
+/**
+ * The synthetic identity used while the bypass above is active. Its
+ * organization_id/project_id are display-only placeholders, exactly like a
+ * real User's - see session.ts's module comment: no data request is ever
+ * authorized by what this object says, only by AGENTOPS_API_KEY.
+ */
+export const LOCAL_BYPASS_USER = {
+  id: "local-bypass",
+  organization_id: "local-development",
+  project_id: null,
+  email: "local-developer@localhost",
+  role: "admin",
+  status: "active",
+  last_login_at: null,
+  organization_name: "Local Development",
+  project_name: null,
+} as const;

@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { authBackendRequest, BackendError } from "./backend";
-import { SESSION_COOKIE_NAME, isProduction } from "./env";
+import { LOCAL_BYPASS_USER, SESSION_COOKIE_NAME, isLocalAuthBypassActive, isProduction } from "./env";
 import type { CurrentUser } from "@/lib/types";
 
 /**
@@ -26,6 +26,10 @@ export async function getRawSessionToken(): Promise<string | null> {
 }
 
 export async function getCurrentUser(): Promise<CurrentUser | null> {
+  if (isLocalAuthBypassActive()) {
+    return LOCAL_BYPASS_USER;
+  }
+
   const token = await getRawSessionToken();
 
   if (!token) {

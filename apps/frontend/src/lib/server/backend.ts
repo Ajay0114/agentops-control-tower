@@ -1,6 +1,18 @@
 import "server-only";
 
-import { BACKEND_API_URL, getBackendApiKey } from "./env";
+import { cookies } from "next/headers";
+
+import { BACKEND_API_URL, getBackendApiKey, SESSION_COOKIE_NAME } from "./env";
+
+// Duplicated from lib/server/session.ts's getRawSessionToken (same 2-line
+// cookie read) rather than imported: session.ts imports authBackendRequest
+// from this file, so importing session.ts back here would be circular.
+// This is the same small-duplication tradeoff proxy.ts already makes for
+// its own copy of the local-auth-bypass check - see its module comment.
+async function getSessionTokenForBackendRequest(): Promise<string | null> {
+  const store = await cookies();
+  return store.get(SESSION_COOKIE_NAME)?.value ?? null;
+}
 
 export class BackendError extends Error {
   status: number;
@@ -62,21 +74,31 @@ interface BackendRequestOptions {
 }
 
 /**
- * Tenant-scoped call to the FastAPI backend using this deployment's own API
- * key - never the browser's credentials, and never a tenant identifier the
+ * Tenant-scoped call to the FastAPI backend - never a tenant identifier the
  * browser supplied. Every route handler that proxies a resource endpoint
- * (agents, executions, sessions, environments, telemetry, dashboard) goes
- * through this one function, so the Authorization header and base URL are
- * defined in exactly one place.
+ * (agents, executions, sessions, environments, projects, telemetry,
+ * dashboard, API-key management) goes through this one function, so the
+ * credential and base URL are defined in exactly one place.
+ *
+ * Sends the caller's own dashboard session token when one exists - the
+ * backend's get_auth_context (see agentops_api/auth.py) resolves that to
+ * the signed-up customer's *own* organization/project, which is what makes
+ * two separately signed-up customers' dashboards see only their own data.
+ * Falls back to this deployment's own internal API key only when there is
+ * no session to send - the local-auth-bypass case (see
+ * docs/architecture/m7-dashboard-and-auth.md), never anything the browser
+ * supplied directly.
  */
 export async function backendRequest<T>(
   path: string,
   options: BackendRequestOptions = {}
 ): Promise<{ data: T; headers: Headers }> {
-  return rawRequest<T>(path, {
-    ...options,
-    headers: { Authorization: `Bearer ${getBackendApiKey()}` },
-  });
+  const sessionToken = await getSessionTokenForBackendRequest();
+  const headers: Record<string, string> = sessionToken
+    ? { "X-Session-Token": sessionToken }
+    : { Authorization: `Bearer ${getBackendApiKey()}` };
+
+  return rawRequest<T>(path, { ...options, headers });
 }
 
 /**

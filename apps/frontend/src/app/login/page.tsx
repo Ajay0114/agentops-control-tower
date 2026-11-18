@@ -101,6 +101,13 @@ export default function LoginPage() {
             {submitting ? "Signing in…" : "Sign in"}
           </button>
         </form>
+
+        <p className="mt-5 text-center text-sm text-slate-500">
+          New here?{" "}
+          <a href="/signup" className="text-blue-400 hover:text-blue-300">
+            Create an organization
+          </a>
+        </p>
       </div>
     </div>
   );

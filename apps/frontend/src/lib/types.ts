@@ -148,9 +148,38 @@ export interface CurrentUser {
   role: string;
   status: string;
   last_login_at: string | null;
+  organization_name: string;
+  project_name: string | null;
+}
+
+export interface Project {
+  id: string;
+  organization_id: string;
+  name: string;
+  slug: string;
+  created_at: string;
 }
 
 export interface Paginated<T> {
   items: T[];
   total: number | null;
+}
+
+export interface IntegrationApiKey {
+  id: string;
+  name: string;
+  key_prefix: string;
+  project_id: string | null;
+  environment_id: string | null;
+  status: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface IntegrationApiKeyCreateResult {
+  api_key: IntegrationApiKey;
+  // Present only once, in the response to the create call itself - never
+  // retrievable again afterward.
+  raw_key: string;
 }

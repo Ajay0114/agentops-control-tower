@@ -13,8 +13,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
-      // See src/test/lucide-react-stub.js for why this alias exists.
-      "lucide-react": path.resolve(__dirname, "./src/test/lucide-react-stub.js"),
+      // See src/test/lucide-react-stub.ts for why this alias exists.
+      "lucide-react": path.resolve(__dirname, "./src/test/lucide-react-stub.ts"),
+      // See src/test/server-only-stub.ts for why this alias exists.
+      "server-only": path.resolve(__dirname, "./src/test/server-only-stub.ts"),
     },
   },
 });
