@@ -38,6 +38,16 @@ beforeEach(() => {
 });
 
 describe("AgentsPage", () => {
+  it("renders a link to register a new agent", () => {
+    fetchAgentsMock.mockReturnValue(new Promise(() => {}));
+    render(<AgentsPage />);
+
+    expect(screen.getByRole("link", { name: /register agent/i })).toHaveAttribute(
+      "href",
+      "/agents/new"
+    );
+  });
+
   it("shows a loading state before data arrives", () => {
     fetchAgentsMock.mockReturnValue(new Promise(() => {}));
     render(<AgentsPage />);

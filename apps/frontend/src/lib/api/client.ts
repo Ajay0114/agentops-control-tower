@@ -137,6 +137,43 @@ export async function fetchAgentVersions(
   return data;
 }
 
+export async function createAgent(params: {
+  environmentId: string;
+  name: string;
+  slug: string;
+  description?: string;
+  framework?: string;
+}): Promise<AgentResponse> {
+  const { data } = await apiFetch<AgentResponse>("/api/agents", undefined, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-csrf-token": readCsrfCookie() },
+    body: JSON.stringify({
+      environment_id: params.environmentId,
+      name: params.name,
+      slug: params.slug,
+      description: params.description || null,
+      framework: params.framework || null,
+    }),
+  });
+  return data;
+}
+
+export async function createAgentVersion(
+  agentId: string,
+  params: { version: string; description?: string }
+): Promise<AgentVersionResponse> {
+  const { data } = await apiFetch<AgentVersionResponse>(
+    `/api/agents/${agentId}/versions`,
+    undefined,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-csrf-token": readCsrfCookie() },
+      body: JSON.stringify({ version: params.version, description: params.description || null }),
+    }
+  );
+  return data;
+}
+
 // --- Environments -----------------------------------------------------
 
 export async function fetchEnvironments(
