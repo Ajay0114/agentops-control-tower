@@ -1,14 +1,15 @@
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
 from agentops_api.auth import AuthContext, get_auth_context
 from agentops_api.db import get_db
-from agentops_api.models.core import Execution
+from agentops_api.models.core import Execution, Session
 from agentops_api.schemas.execution import (
     ExecutionCreate,
     ExecutionResponse,
@@ -94,27 +95,55 @@ def create_execution_endpoint(
 
 @router.get("", response_model=list[ExecutionResponse])
 def list_executions(
+    response: Response,
     session_id: UUID | None = None,
     agent_id: UUID | None = None,
+    environment_id: UUID | None = None,
     execution_status: str | None = Query(default=None, alias="status"),
+    execution_id: UUID | None = Query(
+        default=None,
+        description="Exact execution id match, for the dashboard's execution-id search box.",
+    ),
+    started_after: datetime | None = None,
+    started_before: datetime | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: DBSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    statement = select(Execution).order_by(Execution.created_at.desc())
-    statement = scope_execution_list(statement, auth)
+    def apply_filters(statement):
+        statement = scope_execution_list(statement, auth)
 
-    if session_id is not None:
-        statement = statement.where(Execution.session_id == session_id)
+        if session_id is not None:
+            statement = statement.where(Execution.session_id == session_id)
 
-    if agent_id is not None:
-        statement = statement.where(Execution.agent_id == agent_id)
+        if agent_id is not None:
+            statement = statement.where(Execution.agent_id == agent_id)
 
-    if execution_status is not None:
-        statement = statement.where(Execution.status == execution_status)
+        if environment_id is not None:
+            statement = statement.where(Session.environment_id == environment_id)
 
-    statement = statement.limit(limit).offset(offset)
+        if execution_status is not None:
+            statement = statement.where(Execution.status == execution_status)
+
+        if execution_id is not None:
+            statement = statement.where(Execution.id == execution_id)
+
+        if started_after is not None:
+            statement = statement.where(Execution.started_at >= started_after)
+
+        if started_before is not None:
+            statement = statement.where(Execution.started_at <= started_before)
+
+        return statement
+
+    total = db.execute(
+        apply_filters(select(func.count(Execution.id)))
+    ).scalar_one()
+    response.headers["X-Total-Count"] = str(total)
+
+    statement = apply_filters(select(Execution))
+    statement = statement.order_by(Execution.created_at.desc()).limit(limit).offset(offset)
 
     return db.execute(statement).scalars().all()
 

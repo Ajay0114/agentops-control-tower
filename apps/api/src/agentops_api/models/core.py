@@ -795,3 +795,145 @@ class ApiKey(Base):
     project: Mapped["Project | None"] = relationship()
     environment: Mapped["Environment | None"] = relationship()
 
+
+class User(Base):
+    """A local dashboard account (M7). Entirely separate from ApiKey: a User
+    authenticates a human into the dashboard via the browser-facing session
+    mechanism below, while ApiKey continues to authenticate programmatic
+    callers (the SDK, and the dashboard's own server-side backend calls) via
+    AuthContext. A User's organization_id/project_id are never consulted by
+    AuthContext or tenant_scope.py - they exist only so the dashboard layer
+    can resolve and display which tenant this person belongs to; the actual
+    authorization for every data request still flows through the existing
+    API-key AuthContext mechanism, unchanged."""
+
+    __tablename__ = "users"
+
+    __table_args__ = (
+        Index("ix_users_organization_id", "organization_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Optional narrowing, mirroring ApiKey: null means "the whole organization".
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    # Stored lowercased; uniqueness is case-insensitive by construction.
+    email: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        nullable=False,
+    )
+
+    # Argon2id hash (via argon2-cffi), never the raw password.
+    password_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(20),
+        default="admin",
+        server_default="admin",
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="active",
+        server_default="active",
+        nullable=False,
+    )
+
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    organization: Mapped["Organization"] = relationship()
+    project: Mapped["Project | None"] = relationship()
+
+
+class UserSession(Base):
+    """A server-side dashboard session (M7). Mirrors ApiKey's prefix+hash
+    pattern: the raw session token is returned to the caller (here, the
+    Next.js server layer) exactly once at creation and is never stored -
+    only its SHA-256 hash is persisted, looked up via the non-secret
+    token_prefix. SHA-256 is appropriate here for the same reason it is for
+    ApiKey: the token is 256 bits of secrets.token_urlsafe output, not a
+    human-chosen secret - see api_key_service.py's module docstring."""
+
+    __tablename__ = "user_sessions"
+
+    __table_args__ = (
+        Index("ix_user_sessions_user_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    token_prefix: Mapped[str] = mapped_column(
+        String(20),
+        unique=True,
+        nullable=False,
+    )
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    user: Mapped["User"] = relationship()
+

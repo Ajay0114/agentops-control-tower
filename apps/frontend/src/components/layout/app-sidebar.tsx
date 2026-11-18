@@ -7,55 +7,27 @@ import {
   Activity,
   Bot,
   Command,
-  Database,
+  FolderTree,
   GitBranch,
   LayoutDashboard,
-  Plug,
   Settings,
-  ShieldCheck,
+  Users,
 } from "lucide-react";
 
-const platformNavigation = [
+import type { CurrentUser } from "@/lib/types";
+
+const navigation = [
   { label: "Overview", href: "/", icon: LayoutDashboard },
   { label: "Agents", href: "/agents", icon: Bot },
   { label: "Executions", href: "/executions", icon: Activity },
+  { label: "Sessions", href: "/sessions", icon: Users },
   { label: "Traces", href: "/traces", icon: GitBranch },
-  { label: "Telemetry", href: "/telemetry", icon: Database },
-  { label: "Integrations", href: "/integrations", icon: Plug },
-];
-
-const governanceNavigation = [
-  { label: "Policies", href: "/policies", icon: ShieldCheck },
+  { label: "Environments", href: "/environments", icon: FolderTree },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
 
-export default function AppSidebar() {
+export default function AppSidebar({ user }: { user: CurrentUser }) {
   const pathname = usePathname();
-
-  const renderNavigation = (
-    items: typeof platformNavigation,
-  ) =>
-    items.map((item) => {
-      const Icon = item.icon;
-      const active =
-        item.href === "/"
-          ? pathname === "/"
-          : pathname.startsWith(item.href);
-
-      return (
-        <Link
-          key={item.href}
-          href={item.href}
-          className={`nav-item ${active ? "nav-active" : ""}`}
-        >
-          <Icon size={18} strokeWidth={1.8} />
-          <span>{item.label}</span>
-          {item.href === "/agents" && (
-            <span className="nav-count">12</span>
-          )}
-        </Link>
-      );
-    });
 
   return (
     <aside className="sidebar">
@@ -70,21 +42,30 @@ export default function AppSidebar() {
       </div>
 
       <div className="workspace">
-        <div className="workspace-avatar">A</div>
+        <div className="workspace-avatar">{user.email.slice(0, 1).toUpperCase()}</div>
         <div className="workspace-info">
-          <strong>AgentOps Workspace</strong>
-          <span>Local organization</span>
+          <strong>Local organization</strong>
+          <span>{user.project_id ? "Scoped to one project" : "Organization-wide access"}</span>
         </div>
       </div>
 
       <div className="nav-label">PLATFORM</div>
       <nav className="navigation">
-        {renderNavigation(platformNavigation)}
-      </nav>
+        {navigation.map((item) => {
+          const Icon = item.icon;
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
 
-      <div className="nav-label governance-label">GOVERNANCE</div>
-      <nav className="navigation">
-        {renderNavigation(governanceNavigation)}
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`nav-item ${active ? "nav-active" : ""}`}
+            >
+              <Icon size={18} strokeWidth={1.8} />
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
       </nav>
 
       <div className="sidebar-bottom">
@@ -97,10 +78,10 @@ export default function AppSidebar() {
         </div>
 
         <div className="user-profile">
-          <div className="user-avatar">AK</div>
+          <div className="user-avatar">{user.email.slice(0, 2).toUpperCase()}</div>
           <div className="user-info">
-            <strong>Administrator</strong>
-            <span>Local account</span>
+            <strong>{user.email}</strong>
+            <span className="capitalize">{user.role}</span>
           </div>
         </div>
       </div>

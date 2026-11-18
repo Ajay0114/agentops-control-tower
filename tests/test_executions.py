@@ -618,3 +618,130 @@ def test_environment_restricted_key_cannot_access_execution_in_sibling_environme
     response = client.get(f"/api/v1/executions/{execution_id}", headers=scoped_headers)
 
     assert response.status_code == 404
+
+
+# --- M7: additional list filters (environment_id, time range, id search) and
+# the X-Total-Count header, added for the dashboard's executions page. The
+# response body stays a bare list (see the cross-tenant test above asserting
+# response.json() == []) so these are purely additive.
+
+
+def test_list_executions_returns_total_count_header(client, db_session):
+    create_execution_via_api(client, db_session, "count-header-001")
+    execution_id_2, headers, context = create_execution_via_api(
+        client, db_session, "count-header-002"
+    )
+
+    # Re-use the same org via a fresh key scoped the same way isn't possible
+    # across two independent contexts, so just verify against the second
+    # context's own single execution for a precise count.
+    response = client.get("/api/v1/executions", headers=headers)
+
+    assert response.status_code == 200
+    assert response.headers["X-Total-Count"] == "1"
+    assert len(response.json()) == 1
+
+
+def test_list_executions_filters_by_environment_id(client, db_session):
+    context = create_test_context(db_session)
+    db_session.commit()
+    headers = auth_headers(db_session, context["organization"].id)
+
+    payload = execution_payload(context, "env-filter-match")
+    client.post("/api/v1/executions", json=payload, headers=headers)
+
+    other_environment = Environment(
+        project_id=context["project"].id,
+        name="Staging",
+        slug=f"staging-{uuid4().hex[:8]}",
+    )
+    db_session.add(other_environment)
+    db_session.flush()
+    other_session = Session(
+        project_id=context["project"].id,
+        environment_id=other_environment.id,
+        external_session_id=f"other-session-{uuid4().hex[:8]}",
+        status="active",
+    )
+    db_session.add(other_session)
+    db_session.flush()
+    db_session.commit()
+
+    other_payload = {
+        "session_id": str(other_session.id),
+        "agent_id": str(context["agent"].id),
+        "agent_version_id": str(context["version"].id),
+        "external_execution_id": "env-filter-no-match",
+    }
+    # The agent belongs to the original environment, so creating an execution
+    # against a session in a different environment is rejected - which is
+    # exactly why this filter is meaningful: we instead register a second
+    # agent in the other environment to produce a genuinely different-
+    # environment execution.
+    other_agent = Agent(
+        environment_id=other_environment.id,
+        name="Other Env Agent",
+        slug=f"other-env-agent-{uuid4().hex[:8]}",
+        framework="custom-python",
+        status="registered",
+    )
+    db_session.add(other_agent)
+    db_session.flush()
+    other_payload["agent_id"] = str(other_agent.id)
+    other_payload["agent_version_id"] = None
+    db_session.commit()
+
+    client.post("/api/v1/executions", json=other_payload, headers=headers)
+
+    response = client.get(
+        "/api/v1/executions",
+        params={"environment_id": str(context["environment"].id)},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    ids = {item["external_execution_id"] for item in response.json()}
+    assert ids == {"env-filter-match"}
+
+
+def test_list_executions_filters_by_execution_id_search(client, db_session):
+    execution_id, headers, _ = create_execution_via_api(client, db_session, "search-target")
+
+    response = client.get(
+        "/api/v1/executions", params={"execution_id": execution_id}, headers=headers
+    )
+
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 1
+    assert results[0]["id"] == execution_id
+
+
+def test_list_executions_filters_by_started_after_and_before(client, db_session):
+    execution_id, headers, _ = create_execution_via_api(client, db_session, "time-range-001")
+    client.patch(
+        f"/api/v1/executions/{execution_id}/status",
+        json={"status": "running"},
+        headers=headers,
+    )
+
+    far_future = "2999-01-01T00:00:00Z"
+    far_past = "1999-01-01T00:00:00Z"
+
+    too_late = client.get(
+        "/api/v1/executions", params={"started_after": far_future}, headers=headers
+    )
+    assert too_late.json() == []
+
+    too_early = client.get(
+        "/api/v1/executions", params={"started_before": far_past}, headers=headers
+    )
+    assert too_early.json() == []
+
+    in_range = client.get(
+        "/api/v1/executions",
+        params={"started_after": far_past, "started_before": far_future},
+        headers=headers,
+    )
+    assert len(in_range.json()) == 1
+    assert in_range.json()[0]["id"] == execution_id

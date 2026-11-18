@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AgentOps Control Tower — Dashboard
 
-## Getting Started
+The web dashboard for AgentOps Control Tower: local login, and
+observability into registered agents, executions, sessions and traces,
+backed by the real FastAPI/PostgreSQL backend in `apps/api`.
 
-First, run the development server:
+## Setup
+
+Requires Node.js **20.9+** (Next.js 16 does not support Node 18) and a
+running backend (see the repository root). From this directory:
 
 ```bash
+npm install
+cp .env.example .env.local
+# edit .env.local: set AGENTOPS_API_KEY to a key provisioned with
+# apps/api/scripts/provision_api_key.py create-key (see
+# docs/architecture/m7-dashboard-and-auth.md, sections 2 and 5)
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then sign in at [http://localhost:3000/login](http://localhost:3000/login)
+with a local administrator account - bootstrap one first with
+`apps/api/scripts/bootstrap_admin.py` if you haven't already (see the same
+doc, section 2).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+> Running inside WSL2 against a repository mounted from Windows
+> (`/mnt/c/...`, `/mnt/d/...`)? `next dev`/`next build` can crash with `Bus
+> error` - a Turbopack/drvfs incompatibility, not a code issue. Work from a
+> native Linux path (e.g. `~/agentops-control-tower`) instead, or run Node
+> natively on Windows.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Testing
 
-## Learn More
+```bash
+npm test         # vitest run
+npm run build     # also type-checks every page
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Architecture
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See [`docs/architecture/m7-dashboard-and-auth.md`](../../docs/architecture/m7-dashboard-and-auth.md)
+at the repository root for the full write-up: the local-auth model, the
+browser → Next.js → FastAPI trust boundary (the browser never talks to
+FastAPI directly, and never holds any backend credential), CSRF, and the
+dashboard's own structure (`src/app/(dashboard)/`, the centralized API
+client in `src/lib/api/client.ts`, and the server-only backend proxy in
+`src/lib/server/`).

@@ -8,6 +8,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from agentops_api.config import get_settings
 from agentops_api.db import engine
 from agentops_api.routers.agents import router as agents_router
+from agentops_api.routers.auth import router as auth_router
+from agentops_api.routers.dashboard import router as dashboard_router
 from agentops_api.routers.environments import router as environments_router
 from agentops_api.routers.executions import router as executions_router
 from agentops_api.routers.sessions import router as sessions_router
@@ -48,6 +50,8 @@ app.include_router(agents_router)
 app.include_router(sessions_router)
 app.include_router(executions_router)
 app.include_router(telemetry_router)
+app.include_router(auth_router)
+app.include_router(dashboard_router)
 
 @app.get("/", tags=["platform"])
 def root():
