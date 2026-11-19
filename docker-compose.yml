@@ -28,6 +28,61 @@ services:
       retries: 5
       start_period: 10s
 
+  api:
+    build:
+      context: ./apps/api
+
+    container_name: agentops-api
+
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      APP_NAME: AgentOps Control Tower API
+      # Anything other than "local" - the bootstrap/local-dev convenience
+      # hook in main.py's lifespan (writing a key into apps/frontend's
+      # .env.local on the *host* filesystem) is meaningless inside a
+      # container and is only ever gated on APP_ENV == "local". Real
+      # tenants use the self-service /signup flow (see docs/architecture/
+      # m7-dashboard-and-auth.md section 15), not that local-only bootstrap.
+      APP_ENV: docker
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+    ports:
+      - "8010:8010"
+
+  frontend:
+    build:
+      context: ./apps/frontend
+
+    container_name: agentops-frontend
+
+    restart: unless-stopped
+
+    depends_on:
+      - api
+
+    environment:
+      BACKEND_API_URL: http://api:8010
+      # Off by default, same as local dev - see apps/frontend/.env.example.
+      # NODE_ENV is forced to "production" by `next start`/the standalone
+      # server regardless of this value, so a bypass flag left on by
+      # accident is still refused (docs/architecture/
+      # m7-dashboard-and-auth.md section 11.1). Customers reach their own
+      # dashboard through /signup, not this flag.
+      LOCAL_AUTH_BYPASS: "false"
+      # Only consulted when LOCAL_AUTH_BYPASS=true; unset in the normal
+      # multi-tenant deployment this compose file targets, since every
+      # proxied request is authorized by the signed-in customer's own
+      # session instead (see lib/server/backend.ts's backendRequest).
+      AGENTOPS_API_KEY: ${AGENTOPS_API_KEY:-}
+
+    ports:
+      - "3000:3000"
+
 volumes:
   agentops_postgres_data:
     name: agentops_postgres_data
