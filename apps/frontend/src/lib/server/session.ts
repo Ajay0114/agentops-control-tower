@@ -65,7 +65,9 @@ export async function setSessionCookie(token: string, expiresAt: string): Promis
 
   store.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
-    secure: isProduction,
+    secure: process.env.SESSION_COOKIE_SECURE
+      ? process.env.SESSION_COOKIE_SECURE === "true"
+      : isProduction,
     sameSite: "lax",
     path: "/",
     expires: new Date(expiresAt),
