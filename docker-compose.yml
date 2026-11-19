@@ -79,6 +79,7 @@ services:
       # proxied request is authorized by the signed-in customer's own
       # session instead (see lib/server/backend.ts's backendRequest).
       AGENTOPS_API_KEY: ${AGENTOPS_API_KEY:-}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
 
     ports:
       - "3000:3000"
